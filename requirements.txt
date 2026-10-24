@@ -1,0 +1,5 @@
+﻿pyTelegramBotAPI
+reportlab
+pillow
+qrcode
+python-barcode
