@@ -8,6 +8,7 @@ import re
 import datetime
 import threading
 import urllib.request
+import math
 from io import BytesIO
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
@@ -41,7 +42,7 @@ CBE_NAME = "Dires Gobale (ዲረስ ጎባሌ)"
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=True, num_threads=60)
 
 # -------------------------------------------------------------------------
-# 2. የአማርኛ ፎንት አወራረድ (አንዴ ወርዶ ይቀመጣል፤ ድጋሚ አይወርድም)
+# 2. የአማርኛ ፎንት አወራረድና መመዝገቢያ
 # -------------------------------------------------------------------------
 AMHARIC_FONT = "Helvetica"
 AMHARIC_BOLD = "Helvetica-Bold"
@@ -320,7 +321,7 @@ ETHIOPIA_REGIONS = {
 }
 
 # -------------------------------------------------------------------------
-# 7. Database Layer (SQLite WAL Mode)
+# 7. Database Layer (Strict Unique Phone and FAN)
 # -------------------------------------------------------------------------
 DB_FILE = "fayda_bot_users.db"
 
@@ -351,8 +352,8 @@ def init_db():
             chat_id INTEGER,
             name_am TEXT,
             name_en TEXT,
-            fan_code TEXT,
-            phone TEXT,
+            fan_code TEXT UNIQUE,
+            phone TEXT UNIQUE,
             fin_code TEXT,
             theme TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -450,7 +451,7 @@ def save_card_record(chat_id, name_am, name_en, fan, phone, fin, theme):
     conn = get_db()
     c = conn.cursor()
     c.execute('''
-        INSERT INTO card_records 
+        INSERT OR REPLACE INTO card_records 
         (chat_id, name_am, name_en, fan_code, phone, fin_code, theme)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     ''', (chat_id, name_am, name_en, fan, phone, fin, theme))
@@ -498,7 +499,7 @@ def get_system_analytics():
     }
 
 # -------------------------------------------------------------------------
-# 8. ፈጣን ባርኮድ እና ኪውአር ማመንጫ (High-Speed Generation)
+# 8. የካርድ ዲዛይን (አማርኛ ብቻ ከፎቶ በላይ + ፋይዳ በቀኝ ግርጌ)
 # -------------------------------------------------------------------------
 COLOR_THEMES = {
     "PDF 1": {
@@ -516,6 +517,63 @@ COLOR_THEMES = {
 }
 
 user_data_store = {}
+
+def draw_ethiopian_flag_with_emblem(c, x, y, width=22, height=14):
+    stripe_h = height / 3.0
+    c.setFillColor(HexColor("#078930"))
+    c.rect(x, y + stripe_h * 2, width, stripe_h, fill=1, stroke=0)
+    c.setFillColor(HexColor("#FCDD09"))
+    c.rect(x, y + stripe_h, width, stripe_h, fill=1, stroke=0)
+    c.setFillColor(HexColor("#DA121A"))
+    c.rect(x, y, width, stripe_h, fill=1, stroke=0)
+
+    cx, cy = x + width / 2.0, y + height / 2.0
+    radius = height * 0.38
+    c.setFillColor(HexColor("#0F47AF"))
+    c.circle(cx, cy, radius, fill=1, stroke=0)
+
+    c.setFillColor(HexColor("#FCDD09"))
+    c.setStrokeColor(HexColor("#FCDD09"))
+    c.setLineWidth(0.35)
+    r_outer = radius * 0.75
+    r_inner = radius * 0.32
+    p = c.beginPath()
+    for i in range(10):
+        ang = i * math.pi / 5 - math.pi / 2
+        r = r_outer if i % 2 == 0 else r_inner
+        px = cx + r * math.cos(ang)
+        py = cy + r * math.sin(ang)
+        if i == 0:
+            p.moveTo(px, py)
+        else:
+            p.lineTo(px, py)
+    p.close()
+    c.drawPath(p, fill=1, stroke=0)
+
+def draw_national_id_logo(c, x, y):
+    c.setStrokeColor(HexColor("#0284C7"))
+    c.setLineWidth(0.8)
+    c.circle(x, y, 9, fill=0, stroke=1)
+    
+    c.setFillColor(HexColor("#0284C7"))
+    c.circle(x - 3.5, y + 2, 1.5, fill=1, stroke=0)
+    c.circle(x + 3.5, y + 2, 1.5, fill=1, stroke=0)
+    c.circle(x, y - 4, 1.5, fill=1, stroke=0)
+    c.setLineWidth(0.5)
+    c.line(x - 3.5, y + 2, x, y - 4)
+    c.line(x + 3.5, y + 2, x, y - 4)
+    c.line(x - 3.5, y + 2, x + 3.5, y + 2)
+
+    c.setFillColor(HexColor("#0369A1"))
+    c.setFont(AMHARIC_BOLD, 4.2)
+    c.drawRightString(x - 12, y + 1.5, "ብሔራዊ መታወቂያ")
+    c.setFont("Helvetica-Bold", 4.0)
+    c.drawRightString(x - 12, y - 3.5, "National ID")
+
+def draw_fayda_bottom_right_logo(c, x, y):
+    c.setFillColor(HexColor("#0284C7"))
+    c.setFont(AMHARIC_BOLD, 12)
+    c.drawRightString(x, y, "ፋይዳ")
 
 def generate_fayda_encrypted_qr_payload(data: dict, photo_bytes: bytes) -> str:
     try:
@@ -540,7 +598,7 @@ def generate_fayda_encrypted_qr_payload(data: dict, photo_bytes: bytes) -> str:
 def generate_crisp_barcode(code_text: str):
     code128 = barcode.get_barcode_class('code128')
     writer = ImageWriter()
-    writer.dpi = 150  # ፈጣን እንዲሆን DPI ተስተካክሏል
+    writer.dpi = 150
     bc = code128(code_text, writer=writer)
     buf = BytesIO()
     bc.write(buf, options={"write_text": False, "quiet_zone": 1})
@@ -570,22 +628,15 @@ def draw_card_front(c, data: dict, photo_reader, theme: dict):
         c.bezier(i, 4, i + 35, CARD_H / 2, i - 25, CARD_H - 10, i + 10, CARD_H - 4)
     c.restoreState()
 
-    flag_x, flag_y = 12, CARD_H - 25
-    c.setFillColor(HexColor("#078930")); c.rect(flag_x, flag_y + 8.4, 21, 4.2, fill=1, stroke=0)
-    c.setFillColor(HexColor("#FCDD09")); c.rect(flag_x, flag_y + 4.2, 21, 4.2, fill=1, stroke=0)
-    c.setFillColor(HexColor("#DA121A")); c.rect(flag_x, flag_y, 21, 4.2, fill=1, stroke=0)
+    draw_ethiopian_flag_with_emblem(c, 12, CARD_H - 25, width=22, height=13)
 
     c.setFillColor(HexColor(theme["header_color"]))
-    c.setFont(AMHARIC_BOLD, 7)
-    c.drawString(39, CARD_H - 16, "የኢትዮጵያ ዲጂታል መታወቂያ ካርድ")
-    c.setFont("Helvetica-Bold", 6.8)
-    c.drawString(39, CARD_H - 24, "Ethiopian Digital ID Card")
+    c.setFont(AMHARIC_BOLD, 7.2)
+    c.drawString(38, CARD_H - 16, "የኢትዮጵያ ዲጂታል መታወቂያ ካርድ")
+    c.setFont("Helvetica-Bold", 6.6)
+    c.drawString(38, CARD_H - 24, "Ethiopian Digital ID Card")
 
-    c.setStrokeColor(HexColor(theme["header_color"]))
-    c.setLineWidth(0.8)
-    c.circle(CARD_W - 20, CARD_H - 20, 7, fill=0, stroke=1)
-    c.setFont("Helvetica-Bold", 4.2)
-    c.drawCentredString(CARD_W - 20, CARD_H - 21.5, "FAYDA")
+    draw_national_id_logo(c, CARD_W - 16, CARD_H - 19)
 
     c.drawImage(photo_reader, 18, CARD_H - 110, width=54, height=68, preserveAspectRatio=True)
     c.setStrokeColor(HexColor(theme["border_color"]))
@@ -594,6 +645,8 @@ def draw_card_front(c, data: dict, photo_reader, theme: dict):
 
     c.drawImage(photo_reader, CARD_W - 35, 18, width=17, height=22, preserveAspectRatio=True)
     c.rect(CARD_W - 35, 18, 17, 22, fill=0, stroke=1)
+
+    draw_fayda_bottom_right_logo(c, CARD_W - 42, 28)
 
     c.saveState()
     c.translate(14, CARD_H - 106)
@@ -605,8 +658,10 @@ def draw_card_front(c, data: dict, photo_reader, theme: dict):
 
     x_lbl = 78
     cur_y = CARD_H - 35
-    c.setFont(AMHARIC_FONT, 5); c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(x_lbl, cur_y, "ሙሉ ስም | Full Name")
+    
+    # ሙሉ ስም
+    c.setFont(AMHARIC_FONT, 5.5); c.setFillColor(HexColor(theme["label_color"]))
+    c.drawString(x_lbl, cur_y, "ሙሉ ስም")
     cur_y -= 6.5
     c.setFont(AMHARIC_BOLD, 7.5); c.setFillColor(HexColor(theme["text_color"]))
     c.drawString(x_lbl, cur_y, data["name_am"])
@@ -615,22 +670,25 @@ def draw_card_front(c, data: dict, photo_reader, theme: dict):
     c.drawString(x_lbl, cur_y, data["name_en"])
 
     cur_y -= 9
-    c.setFont(AMHARIC_FONT, 5); c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(x_lbl, cur_y, "የትውልድ ቀን | Date of Birth")
+    # የትውልድ ቀን
+    c.setFont(AMHARIC_FONT, 5.5); c.setFillColor(HexColor(theme["label_color"]))
+    c.drawString(x_lbl, cur_y, "የትውልድ ቀን")
     cur_y -= 6.5
     c.setFont("Helvetica-Bold", 6.2); c.setFillColor(HexColor(theme["text_color"]))
     c.drawString(x_lbl, cur_y, f"{data['dob_ec']} | {data['dob_gc']}")
 
     cur_y -= 9
-    c.setFont(AMHARIC_FONT, 5); c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(x_lbl, cur_y, "ጾታ | Sex")
+    # ጾታ
+    c.setFont(AMHARIC_FONT, 5.5); c.setFillColor(HexColor(theme["label_color"]))
+    c.drawString(x_lbl, cur_y, "ጾታ")
     cur_y -= 6.5
     c.setFont(AMHARIC_BOLD, 6.2); c.setFillColor(HexColor(theme["text_color"]))
     c.drawString(x_lbl, cur_y, f"{data['sex_am']} | {data['sex_en']}")
 
     cur_y -= 9
-    c.setFont(AMHARIC_FONT, 5); c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(x_lbl, cur_y, "የተሰጠበትና የሚያበቃበት ቀን | Issued & Expiry")
+    # የተሰጠበትና የሚያበቃበት ቀን
+    c.setFont(AMHARIC_FONT, 5.5); c.setFillColor(HexColor(theme["label_color"]))
+    c.drawString(x_lbl, cur_y, "የተሰጠበትና የሚያበቃበት ቀን")
     cur_y -= 6.5
     c.setFont("Helvetica-Bold", 6.2); c.setFillColor(HexColor(theme["text_color"]))
     c.drawString(x_lbl, cur_y, f"{data['issued_gc']} | {data['expiry_gc']}")
@@ -820,7 +878,9 @@ def action_resend(message):
 def action_pdf_generation(message, theme_name):
     chat_id = message.chat.id
     bot.clear_step_handler_by_chat_id(chat_id)
-    user_data_store[chat_id] = {"theme": theme_name}
+    if chat_id not in user_data_store:
+        user_data_store[chat_id] = {}
+    user_data_store[chat_id]["theme"] = theme_name
 
     if chat_id == ADMIN_CHAT_ID:
         start_card_creation_flow(chat_id, theme_name)
@@ -863,6 +923,8 @@ def step_choose_quantity(message):
     count = int(digits[0]) if digits else 1
 
     total_cost = count * PRICE_PER_CARD
+    if chat_id not in user_data_store:
+        user_data_store[chat_id] = {}
     user_data_store[chat_id]["expected_pay"] = total_cost
     user_data_store[chat_id]["cards_count"] = count
 
@@ -879,7 +941,7 @@ def step_choose_quantity(message):
         bot.register_next_step_handler(msg, step_verify_payment_receipt)
 
 # -------------------------------------------------------------------------
-# 12. ደረሰኝ ማረጋገጫ
+# 12. ደረሰኝ ማረጋገጫና ወደ ቀጣይ ደረጃ ማስተላለፊያ
 # -------------------------------------------------------------------------
 def step_verify_payment_receipt(message):
     chat_id = message.chat.id
@@ -903,6 +965,8 @@ def step_verify_payment_receipt(message):
             bot.register_next_step_handler(msg, step_verify_payment_receipt)
         return
 
+    if chat_id not in user_data_store:
+        user_data_store[chat_id] = {}
     user_data_store[chat_id]["temp_tx_id"] = tx_id
     prompt_payer = "👤 **በደረሰኙ ላይ የሚታየውን የከፋይ ሙሉ ስም እና ስልክ ቁጥር ያስገቡ፦**\n\n(ምሳሌ፡ አበበ ከበደ - 0912345678)"
     msg = safe_send_message(chat_id, prompt_payer, reply_markup=get_main_keyboard(), parse_mode="Markdown")
@@ -940,6 +1004,7 @@ def step_verify_payer_info(message):
     record_used_receipt(tx_id, chat_id, amount_to_credit, sender_name, sender_phone)
     add_user_balance(chat_id, amount_to_credit)
 
+    # ለአድሚን ማሳወቂያ መላክ (ከበስተጀርባ thread እንዳያቆመው)
     notify_admin(
         f"💵 **አዲስ ክፍያ ተረጋግጧል!**\n\n"
         f"👤 ከፋይ: `{sender_name}`\n"
@@ -949,8 +1014,10 @@ def step_verify_payer_info(message):
         f"🆔 Chat ID: `{chat_id}`"
     )
 
-    safe_send_message(chat_id, f"✅ **ክፍያዎ ተረጋግጧል!** `{amount_to_credit:.2f} ETB` ተጨምሯል።")
+    safe_send_message(chat_id, f"✅ **ክፍያዎ ተረጋግጧል!** `{amount_to_credit:.2f} ETB` ተጨምሯል።\n\nወዲያውኑ ወደ ካርድ መስሪያው ደረጃ እናልፋለን...")
+    
     theme_key = user_data_store.get(chat_id, {}).get("theme", "PDF 1")
+    # ያለምንም መቆራረጥ በቀጥታ ወደ 1ኛው ደረጃ መላክ
     start_card_creation_flow(chat_id, theme_key)
 
 # -------------------------------------------------------------------------
@@ -958,6 +1025,10 @@ def step_verify_payer_info(message):
 # -------------------------------------------------------------------------
 def start_card_creation_flow(chat_id, theme_key):
     bot.clear_step_handler_by_chat_id(chat_id)
+    if chat_id not in user_data_store:
+        user_data_store[chat_id] = {}
+    user_data_store[chat_id]["theme"] = theme_key
+
     msg = safe_send_message(
         chat_id,
         f"🎨 **{theme_key} ተመርጧል!**\n\n1️⃣ እባክዎ ሙሉ **ስምዎን በአማርኛ** ያስገቡ (ምሳሌ፡ ዲረስ ጎባሌ መለሰ)፦",
@@ -1005,7 +1076,7 @@ def step_fan_validation(message):
         return
 
     if chat_id != ADMIN_CHAT_ID and is_fan_registered(text):
-        msg = safe_send_message(chat_id, "🚫 ይህ FAN ቁጥር ቀደም ሲል ተመዝግቧል። እባክዎ የእራስዎን FAN ያስገቡ፦")
+        msg = safe_send_message(chat_id, "🚫 **ይህ FAN ቁጥር ቀደም ሲል ሌላ ሰው ተጠቅሞበታል!** እባክዎ የእራስዎን FAN ያስገቡ፦")
         if msg:
             bot.register_next_step_handler(msg, step_fan_validation)
         return
@@ -1067,7 +1138,7 @@ def step_phone(message):
         return
 
     if chat_id != ADMIN_CHAT_ID and is_phone_registered(clean_phone):
-        msg = safe_send_message(chat_id, "🚫 ይህ ስልክ ቁጥር ቀድሞ በሌላ ካርድ ላይ ተመዝግቧል፦")
+        msg = safe_send_message(chat_id, "🚫 **ይህ ስልክ ቁጥር ቀድሞ በሌላ ካርድ ላይ ተመዝግቧል!** እባክዎ ያልተመዘገበ የራስዎን ስልክ ያስገቡ፦")
         if msg:
             bot.register_next_step_handler(msg, step_phone)
         return
@@ -1185,7 +1256,7 @@ def step_woreda_select(message):
         bot.register_next_step_handler(msg, step_photo)
 
 # -------------------------------------------------------------------------
-# 14. እጅግ ፈጣን ፒዲኤፍ ማመንጫ እና መላኪያ (Ultra-Fast PDF Generator)
+# 14. ፒዲኤፍ ማመንጫ እና መላኪያ
 # -------------------------------------------------------------------------
 def step_photo(message):
     chat_id = message.chat.id
@@ -1200,7 +1271,6 @@ def step_photo(message):
 
     status_msg = safe_send_message(chat_id, "⚡ ካርዱ በቅጽበት እየተዘጋጀ ነው...")
 
-    # ፎቶውን በቀጥታ በMemory (RAM) ውስጥ ብቻ በማስቀመጥ ፋይል መጻፍ/ማንበብን ማስቀረት
     file_info = bot.get_file(message.photo[-1].file_id)
     photo_bytes = bot.download_file(file_info.file_path)
     photo_reader = ImageReader(BytesIO(photo_bytes))
@@ -1230,7 +1300,6 @@ def step_photo(message):
         "sn": str(int(time.time()))[-7:]
     }
 
-    # ፒዲኤፍ ማመንጨት (1-2 ሰከንድ ብቻ)
     pdf_buffer = BytesIO()
     c = canvas.Canvas(pdf_buffer, pagesize=(CARD_W, CARD_H))
     draw_card_front(c, card_data, photo_reader, theme)
@@ -1242,7 +1311,6 @@ def step_photo(message):
 
     filename = f"Fayda_Card_{card_data['name_en'].replace(' ', '_')}.pdf"
     
-    # ፒዲኤፉን በቀጥታ ለተጠቃሚው መላክ
     try:
         bot.send_document(
             chat_id,
@@ -1262,7 +1330,6 @@ def step_photo(message):
     except Exception as e:
         print(f"Send document error: {e}")
 
-    # ዳታቤዝ እና የአድሚን ማሳወቂያን ከበስተጀርባ (Background) ማካሄድ ካርዱ እንዳይዘገይ
     def _background_save_and_notify():
         try:
             save_card_record(
@@ -1368,7 +1435,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Dires Fayda Bot is Live and Ultra Fast!")
+        self.wfile.write(b"Dires Fayda Bot is Live and Authentic!")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
@@ -1383,7 +1450,7 @@ def main():
         bot.remove_webhook()
     except Exception:
         pass
-    print("🚀 Dires Hub Bot (Ultra Fast PDF Engine) is running...")
+    print("🚀 Dires Hub Bot (Seamless Payment-to-Card Transition) is running...")
     
     while True:
         try:
