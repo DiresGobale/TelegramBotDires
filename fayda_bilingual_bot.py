@@ -16,7 +16,7 @@ from telebot import types, apihelper
 import qrcode
 import barcode
 from barcode.writer import ImageWriter
-from PIL import Image
+from PIL import Image, ImageOps, ImageDraw
 from reportlab.lib.colors import HexColor
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
@@ -42,7 +42,7 @@ CBE_NAME = "Dires Gobale (ዲረስ ጎባሌ)"
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=True, num_threads=60)
 
 # -------------------------------------------------------------------------
-# 2. የአማርኛ ፎንት አወራረድና መመዝገቢያ
+# 2. የአማርኛ ፎንት አወራረድና ምዝገባ
 # -------------------------------------------------------------------------
 AMHARIC_FONT = "Helvetica"
 AMHARIC_BOLD = "Helvetica-Bold"
@@ -80,7 +80,7 @@ CARD_W = 242.6
 CARD_H = 153.0
 
 # -------------------------------------------------------------------------
-# 3. የአድሚን ማሳወቂያ እና አስተማማኝ መልእክት መላኪያ
+# 3. የአድሚን ማሳወቂያ እና መልእክት መላኪያ
 # -------------------------------------------------------------------------
 def notify_admin(text: str):
     def _send():
@@ -100,7 +100,7 @@ def safe_send_message(chat_id, text, reply_markup=None, parse_mode=None, retries
             time.sleep(0.5)
 
 # -------------------------------------------------------------------------
-# 4. አማርኛን ወደ እንግሊዝኛ መቀየሪያ
+# 4. ፊደላት መተርጎሚያ
 # -------------------------------------------------------------------------
 AMH_TO_ENG = {
     'ሀ': 'Ha', 'ሁ': 'Hu', 'ሂ': 'Hi', 'ሃ': 'Ha', 'ሄ': 'He', 'ህ': 'H', 'ሆ': 'Ho',
@@ -178,7 +178,7 @@ def parse_and_convert_dob(input_text: str):
         return text, text
 
 # -------------------------------------------------------------------------
-# 6. የኢትዮጵያ ክልሎች፣ ዞኖች እና ወረዳዎች
+# 6. የኢትዮጵያ ክልሎች ዳታቤዝ
 # -------------------------------------------------------------------------
 ETHIOPIA_REGIONS = {
     "አማራ (Amhara)": {
@@ -499,33 +499,98 @@ def get_system_analytics():
     }
 
 # -------------------------------------------------------------------------
-# 8. የካርድ ዲዛይን (አማርኛ ብቻ ከፎቶ በላይ + ፋይዳ በቀኝ ግርጌ)
+# 8. ራስ-ሰር የፎቶ ማስተካከያ (Smart Crop: Full Body to Passport Headshot)
 # -------------------------------------------------------------------------
-COLOR_THEMES = {
-    "PDF 1": {
-        "bg_color": "#F4FBF7", "border_color": "#94A3B8", "header_color": "#0D5C46",
-        "label_color": "#64748B", "text_color": "#0F172A", "line_color": "#E2F4EC"
-    },
-    "PDF 2": {
-        "bg_color": "#F0F9FF", "border_color": "#7DD3FC", "header_color": "#0369A1",
-        "label_color": "#64748B", "text_color": "#0F172A", "line_color": "#E0F2FE"
-    },
-    "PDF 3": {
-        "bg_color": "#FFFBEB", "border_color": "#FCD34D", "header_color": "#B45309",
-        "label_color": "#78716C", "text_color": "#451A03", "line_color": "#FEF3C7"
-    }
-}
+def prepare_portrait_photo(photo_bytes: bytes, target_width=320, target_height=420):
+    """ተጠቃሚው ሙሉ ቁመት (Full Body) ፎቶ ቢልክ እንኳን ፊቱንና ደረቱን ፈልጎ የፓስፖርት ፎቶ ያደርገዋል"""
+    img = Image.open(BytesIO(photo_bytes)).convert("RGB")
+    img = ImageOps.exif_transpose(img)
+    w, h = img.size
+
+    # ሙሉ የቆመ ሰው ከሆነ (ረጅም ፎቶ) የላይኛውን 50% ብቻ ወስዶ ፊቱን አጉልቶ ያወጣል
+    if h > w * 1.2:
+        crop_h = int(w * 1.35)
+        if crop_h < h:
+            img = img.crop((0, 0, w, crop_h))
+            w, h = img.size
+
+    target_ratio = target_width / target_height
+    current_ratio = w / h
+
+    if current_ratio > target_ratio:
+        new_w = int(h * target_ratio)
+        offset = (w - new_w) // 2
+        img = img.crop((offset, 0, offset + new_w, h))
+    else:
+        new_h = int(w / target_ratio)
+        img = img.crop((0, 0, w, new_h))
+
+    img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    buf.seek(0)
+    return buf
+
+# -------------------------------------------------------------------------
+# 9. የካርዱ ትክክለኛ የሁለት ቀለም ዳራ ማመንጫ (Mint Green + Warm Sunny Yellow)
+# -------------------------------------------------------------------------
+CARD_BG_CACHE = None
+
+def get_dual_tone_card_background():
+    """በግራ በኩል ደማቅ ሚንት አረንጓዴ፣ በቀኝ በኩል ደግሞ ወርቃማ ቢጫ ቀለም ያለው ድንቅ ዳራ ያዘጋጃል"""
+    global CARD_BG_CACHE
+    if CARD_BG_CACHE:
+        CARD_BG_CACHE.seek(0)
+        return CARD_BG_CACHE
+
+    width, height = 1000, 630
+    img = Image.new("RGB", (width, height), "#FFFFFF")
+    pixels = img.load()
+
+    # የሁለቱ ቀለሞች ቅንብር
+    # Mint Green: (134, 239, 196) / (110, 231, 183)
+    # Warm Sunny Yellow: (254, 240, 138) / (253, 224, 71)
+    for y in range(height):
+        for x in range(width):
+            # በግራ እና በቀኝ መካከል የሚደረግ የከለር ውህደት
+            fx = x / float(width)
+            fy = (height - y) / float(height)
+
+            # በቀኝ በኩል እና መሃል ላይ የቢጫው ክብደት ይጨምራል
+            yellow_weight = math.pow(fx, 0.9) * 0.75 + math.pow(fy, 1.2) * 0.25
+            yellow_weight = min(1.0, max(0.0, yellow_weight))
+
+            # አረንጓዴ (Mint) እና ቢጫ (Warm Yellow) ውህደት
+            r = int((140 * (1 - yellow_weight)) + (254 * yellow_weight))
+            g = int((240 * (1 - yellow_weight)) + (235 * yellow_weight))
+            b = int((205 * (1 - yellow_weight)) + (130 * yellow_weight))
+
+            pixels[x, y] = (r, g, b)
+
+    draw = ImageDraw.Draw(img)
+
+    # የሞገድ መስመሮች (Guilloche Wave Lines)
+    for i in range(-200, width + 200, 45):
+        points = []
+        for step_x in range(0, width + 10, 20):
+            step_y = int(math.sin((step_x + i) * 0.015) * 45 + (step_x * 0.2) + (i * 0.5))
+            points.append((step_x, step_y % height))
+        draw.line(points, fill=(160, 245, 215), width=2)
+
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    buf.seek(0)
+    CARD_BG_CACHE = buf
+    return CARD_BG_CACHE
 
 user_data_store = {}
 
-def draw_ethiopian_flag_with_emblem(c, x, y, width=22, height=14):
+def draw_ethiopian_flag(c, x, y, width=22, height=14):
+    """የኢትዮጵያ ባንዲራ ከነ ሰማያዊው አርማ እና ቢጫ ኮከብ"""
     stripe_h = height / 3.0
-    c.setFillColor(HexColor("#078930"))
-    c.rect(x, y + stripe_h * 2, width, stripe_h, fill=1, stroke=0)
-    c.setFillColor(HexColor("#FCDD09"))
-    c.rect(x, y + stripe_h, width, stripe_h, fill=1, stroke=0)
-    c.setFillColor(HexColor("#DA121A"))
-    c.rect(x, y, width, stripe_h, fill=1, stroke=0)
+    c.setFillColor(HexColor("#078930")); c.rect(x, y + stripe_h * 2, width, stripe_h, fill=1, stroke=0)
+    c.setFillColor(HexColor("#FCDD09")); c.rect(x, y + stripe_h, width, stripe_h, fill=1, stroke=0)
+    c.setFillColor(HexColor("#DA121A")); c.rect(x, y, width, stripe_h, fill=1, stroke=0)
 
     cx, cy = x + width / 2.0, y + height / 2.0
     radius = height * 0.38
@@ -535,12 +600,10 @@ def draw_ethiopian_flag_with_emblem(c, x, y, width=22, height=14):
     c.setFillColor(HexColor("#FCDD09"))
     c.setStrokeColor(HexColor("#FCDD09"))
     c.setLineWidth(0.35)
-    r_outer = radius * 0.75
-    r_inner = radius * 0.32
     p = c.beginPath()
     for i in range(10):
         ang = i * math.pi / 5 - math.pi / 2
-        r = r_outer if i % 2 == 0 else r_inner
+        r = radius * 0.75 if i % 2 == 0 else radius * 0.32
         px = cx + r * math.cos(ang)
         py = cy + r * math.sin(ang)
         if i == 0:
@@ -550,30 +613,40 @@ def draw_ethiopian_flag_with_emblem(c, x, y, width=22, height=14):
     p.close()
     c.drawPath(p, fill=1, stroke=0)
 
-def draw_national_id_logo(c, x, y):
-    c.setStrokeColor(HexColor("#0284C7"))
-    c.setLineWidth(0.8)
-    c.circle(x, y, 9, fill=0, stroke=1)
+def draw_exact_national_id_logo(c, x, y):
+    """በቀኝ ራስጌ ላይ ያለውን ኦሪጅናል የብሔራዊ መታወቂያ ክብ አርማ ይስላል"""
+    c.saveState()
+    # ሰማያዊ ክብ ዳራ
+    c.setFillColor(HexColor("#0284C7"))
+    c.circle(x, y, 9, fill=1, stroke=0)
     
-    c.setFillColor(HexColor("#0284C7"))
-    c.circle(x - 3.5, y + 2, 1.5, fill=1, stroke=0)
-    c.circle(x + 3.5, y + 2, 1.5, fill=1, stroke=0)
-    c.circle(x, y - 4, 1.5, fill=1, stroke=0)
-    c.setLineWidth(0.5)
-    c.line(x - 3.5, y + 2, x, y - 4)
-    c.line(x + 3.5, y + 2, x, y - 4)
-    c.line(x - 3.5, y + 2, x + 3.5, y + 2)
+    # በክቡ ውስጥ ነጭ የዲጂታል ኖዶች እና መስመሮች
+    c.setFillColor(HexColor("#FFFFFF"))
+    c.setStrokeColor(HexColor("#FFFFFF"))
+    c.setLineWidth(0.65)
+    c.circle(x - 3.5, y + 2.5, 1.3, fill=1, stroke=0)
+    c.circle(x + 3.5, y + 2.5, 1.3, fill=1, stroke=0)
+    c.circle(x, y - 4, 1.3, fill=1, stroke=0)
+    c.circle(x, y + 0.5, 1.6, fill=1, stroke=0)
+    c.line(x - 3.5, y + 2.5, x, y + 0.5)
+    c.line(x + 3.5, y + 2.5, x, y + 0.5)
+    c.line(x, y - 4, x, y + 0.5)
 
-    c.setFillColor(HexColor("#0369A1"))
+    # በጎኑ ያለ ጽሑፍ
+    c.setFillColor(HexColor("#044E72"))
     c.setFont(AMHARIC_BOLD, 4.2)
-    c.drawRightString(x - 12, y + 1.5, "ብሔራዊ መታወቂያ")
-    c.setFont("Helvetica-Bold", 4.0)
-    c.drawRightString(x - 12, y - 3.5, "National ID")
+    c.drawString(x + 12, y + 2, "ብሔራዊ መታወቂያ")
+    c.setFont("Helvetica-Bold", 4.8)
+    c.drawString(x + 12, y - 4, "National ID")
+    c.restoreState()
 
-def draw_fayda_bottom_right_logo(c, x, y):
-    c.setFillColor(HexColor("#0284C7"))
-    c.setFont(AMHARIC_BOLD, 12)
-    c.drawRightString(x, y, "ፋይዳ")
+def draw_fayda_amharic_center_logo(c, x, y):
+    """መሃል ላይ የሚታየውን ኦሪጅናል 'ፋይዳ' ምልክት ይስላል"""
+    c.saveState()
+    c.setFillColor(HexColor("#34A87C"))
+    c.setFont(AMHARIC_BOLD, 17)
+    c.drawString(x, y, "ፋይዳ")
+    c.restoreState()
 
 def generate_fayda_encrypted_qr_payload(data: dict, photo_bytes: bytes) -> str:
     try:
@@ -615,150 +688,212 @@ def generate_crisp_qr(data_text: str):
     buf.seek(0)
     return buf
 
-def draw_card_front(c, data: dict, photo_reader, theme: dict):
-    c.setFillColor(HexColor(theme["bg_color"]))
-    c.setStrokeColor(HexColor(theme["border_color"]))
+# -------------------------------------------------------------------------
+# 10. Front Side Rendering
+# -------------------------------------------------------------------------
+def draw_card_front(c, data: dict, photo_reader, ghost_reader):
+    # ሁለቱንም ቀለሞች (Mint Green & Warm Yellow) የያዘውን ዳራ መሳል
+    bg_buf = get_dual_tone_card_background()
+    c.drawImage(ImageReader(bg_buf), 0, 0, width=CARD_W, height=CARD_H)
+
+    # የካርዱ ዙሪያ ድንበር
+    c.setStrokeColor(HexColor("#86EFAC"))
     c.setLineWidth(0.65)
-    c.roundRect(4, 4, CARD_W - 8, CARD_H - 8, radius=7, fill=1, stroke=1)
+    c.roundRect(3, 3, CARD_W - 6, CARD_H - 6, radius=6, fill=0, stroke=1)
 
-    c.saveState()
-    c.setStrokeColor(HexColor(theme["line_color"]))
-    c.setLineWidth(0.35)
-    for i in range(0, int(CARD_W), 14):
-        c.bezier(i, 4, i + 35, CARD_H / 2, i - 25, CARD_H - 10, i + 10, CARD_H - 4)
-    c.restoreState()
+    # በማዕከሉ ደብዛዛ የኢትዮጵያ ኮከብ አርማ (Watermark Star)
+    cx, cy = CARD_W * 0.58, CARD_H * 0.45
+    c.setStrokeColor(HexColor("#C8F5E2"))
+    c.setFillColor(HexColor("#D4F7E7"))
+    c.setLineWidth(0.6)
+    p = c.beginPath()
+    for i in range(10):
+        ang = i * math.pi / 5 - math.pi / 2
+        r = 26 if i % 2 == 0 else 10
+        px = cx + r * math.cos(ang)
+        py = cy + r * math.sin(ang)
+        if i == 0:
+            p.moveTo(px, py)
+        else:
+            p.lineTo(px, py)
+    p.close()
+    c.drawPath(p, fill=1, stroke=1)
 
-    draw_ethiopian_flag_with_emblem(c, 12, CARD_H - 25, width=22, height=13)
+    # 1. ባንዲራ
+    draw_ethiopian_flag(c, 12, CARD_H - 24, width=22, height=13)
 
-    c.setFillColor(HexColor(theme["header_color"]))
-    c.setFont(AMHARIC_BOLD, 7.2)
+    # 2. ርዕስ (Title)
+    c.setFillColor(HexColor("#084534"))
+    c.setFont(AMHARIC_BOLD, 7.5)
     c.drawString(38, CARD_H - 16, "የኢትዮጵያ ዲጂታል መታወቂያ ካርድ")
-    c.setFont("Helvetica-Bold", 6.6)
+    c.setFont("Helvetica-Bold", 7.0)
     c.drawString(38, CARD_H - 24, "Ethiopian Digital ID Card")
 
-    draw_national_id_logo(c, CARD_W - 16, CARD_H - 19)
+    # 3. ብሔራዊ መታወቂያ አርማ (National ID Logo)
+    draw_exact_national_id_logo(c, CARD_W - 55, CARD_H - 18)
 
-    c.drawImage(photo_reader, 18, CARD_H - 110, width=54, height=68, preserveAspectRatio=True)
-    c.setStrokeColor(HexColor(theme["border_color"]))
-    c.setLineWidth(0.7)
-    c.rect(18, CARD_H - 110, 54, 68, fill=0, stroke=1)
+    # 4. ዋና የቁም ፎቶ (Smart Portrait Headshot)
+    photo_w, photo_h = 56, 73
+    photo_x, photo_y = 12, CARD_H - 110
+    c.drawImage(photo_reader, photo_x, photo_y, width=photo_w, height=photo_h, preserveAspectRatio=True)
+    c.setStrokeColor(HexColor("#6EE7B7"))
+    c.setLineWidth(0.65)
+    c.rect(photo_x, photo_y, photo_w, photo_h, fill=0, stroke=1)
 
-    c.drawImage(photo_reader, CARD_W - 35, 18, width=17, height=22, preserveAspectRatio=True)
-    c.rect(CARD_W - 35, 18, 17, 22, fill=0, stroke=1)
+    # 5. ትንሽ የደህንነት ፎቶ (Ghost Portrait)
+    ghost_w, ghost_h = 19, 25
+    ghost_x, ghost_y = CARD_W - 44, 15
+    c.drawImage(ghost_reader, ghost_x, ghost_y, width=ghost_w, height=ghost_h, preserveAspectRatio=True)
+    c.setStrokeColor(HexColor("#6EE7B7"))
+    c.setLineWidth(0.5)
+    c.rect(ghost_x, ghost_y, ghost_w, ghost_h, fill=0, stroke=1)
 
-    draw_fayda_bottom_right_logo(c, CARD_W - 42, 28)
-
+    # 6. የጎን ጽሑፍ (Date of Issue & Date)
     c.saveState()
-    c.translate(14, CARD_H - 106)
+    c.translate(8.5, CARD_H - 105)
     c.rotate(90)
-    c.setFont("Helvetica", 4.3)
-    c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(0, 0, f"{data['issued_gc']} | {data['expiry_gc']}")
+    c.setFont(AMHARIC_FONT, 3.8)
+    c.setFillColor(HexColor("#4B8B70"))
+    c.drawString(0, 0, f"የተሰጠበት ቀን  15/02/2019 Date of Issue       {data['issued_gc']}")
     c.restoreState()
 
-    x_lbl = 78
+    # 7. የካርዱ ዝርዝር መረጃዎች (በወርቃማ-ቡኒ ርዕሶች)
+    x_lbl = 76
     cur_y = CARD_H - 35
     
     # ሙሉ ስም
-    c.setFont(AMHARIC_FONT, 5.5); c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(x_lbl, cur_y, "ሙሉ ስም")
-    cur_y -= 6.5
-    c.setFont(AMHARIC_BOLD, 7.5); c.setFillColor(HexColor(theme["text_color"]))
+    c.setFont(AMHARIC_FONT, 4.6); c.setFillColor(HexColor("#92400E"))
+    c.drawString(x_lbl, cur_y, "ሙሉ ስም | Full Name")
+    cur_y -= 6.2
+    c.setFont(AMHARIC_BOLD, 7.5); c.setFillColor(HexColor("#06281D"))
     c.drawString(x_lbl, cur_y, data["name_am"])
-    cur_y -= 7.5
-    c.setFont("Helvetica-Bold", 6.5)
+    cur_y -= 7.2
+    c.setFont("Helvetica-Bold", 6.8); c.setFillColor(HexColor("#06281D"))
     c.drawString(x_lbl, cur_y, data["name_en"])
 
-    cur_y -= 9
+    cur_y -= 8.5
     # የትውልድ ቀን
-    c.setFont(AMHARIC_FONT, 5.5); c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(x_lbl, cur_y, "የትውልድ ቀን")
-    cur_y -= 6.5
-    c.setFont("Helvetica-Bold", 6.2); c.setFillColor(HexColor(theme["text_color"]))
-    c.drawString(x_lbl, cur_y, f"{data['dob_ec']} | {data['dob_gc']}")
+    c.setFont(AMHARIC_FONT, 4.6); c.setFillColor(HexColor("#92400E"))
+    c.drawString(x_lbl, cur_y, "የትውልድ ቀን | Date of Birth")
+    cur_y -= 6.2
+    c.setFont("Helvetica-Bold", 6.5); c.setFillColor(HexColor("#06281D"))
+    c.drawString(x_lbl, cur_y, f"{data['dob_ec']}  |  {data['dob_gc']}")
 
-    cur_y -= 9
+    cur_y -= 8.5
     # ጾታ
-    c.setFont(AMHARIC_FONT, 5.5); c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(x_lbl, cur_y, "ጾታ")
-    cur_y -= 6.5
-    c.setFont(AMHARIC_BOLD, 6.2); c.setFillColor(HexColor(theme["text_color"]))
-    c.drawString(x_lbl, cur_y, f"{data['sex_am']} | {data['sex_en']}")
+    c.setFont(AMHARIC_FONT, 4.6); c.setFillColor(HexColor("#92400E"))
+    c.drawString(x_lbl, cur_y, "ጾታ | Sex")
+    cur_y -= 6.2
+    c.setFont(AMHARIC_BOLD, 6.5); c.setFillColor(HexColor("#06281D"))
+    c.drawString(x_lbl, cur_y, data["sex_am"])
+    c.setFont("Helvetica-Bold", 6.5)
+    c.drawString(x_lbl + 22, cur_y, f"|  {data['sex_en']}")
 
-    cur_y -= 9
-    # የተሰጠበትና የሚያበቃበት ቀን
-    c.setFont(AMHARIC_FONT, 5.5); c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(x_lbl, cur_y, "የተሰጠበትና የሚያበቃበት ቀን")
-    cur_y -= 6.5
-    c.setFont("Helvetica-Bold", 6.2); c.setFillColor(HexColor(theme["text_color"]))
-    c.drawString(x_lbl, cur_y, f"{data['issued_gc']} | {data['expiry_gc']}")
+    cur_y -= 8.5
+    # የሚያበቃበት ቀን
+    c.setFont(AMHARIC_FONT, 4.6); c.setFillColor(HexColor("#92400E"))
+    c.drawString(x_lbl, cur_y, "የሚያበቃበት ቀን | Date of Expiry")
+    cur_y -= 6.2
+    c.setFont("Helvetica-Bold", 6.5); c.setFillColor(HexColor("#06281D"))
+    c.drawString(x_lbl, cur_y, f"{data['expiry_ec']} | {data['expiry_gc']}")
+
+    # 8. 'ፋይዳ' መሃል ላይ
+    draw_fayda_amharic_center_logo(c, CARD_W - 95, 52)
+
+    # 9. ባርኮድ እና FAN
+    c.setFont(AMHARIC_FONT, 4.2); c.setFillColor(HexColor("#4B8B70"))
+    c.drawString(76, 32, "ካርድ")
+    c.drawString(76, 26, "ቁጥር")
+    c.setFont("Helvetica-Bold", 4.2)
+    c.drawString(76, 20, "FAN")
 
     bc_buf = generate_crisp_barcode(data["fan_code"])
-    c.setFont("Helvetica-Bold", 5.8); c.setFillColor(HexColor(theme["text_color"]))
-    formatted_fan = " ".join([data["fan_code"][i:i+4] for i in range(0, 16, 4)])
-    c.drawCentredString(142, 26, formatted_fan)
-    c.drawImage(ImageReader(bc_buf), 90, 13, width=102, height=11)
-
-def draw_card_back(c, data: dict, photo_bytes: bytes, theme: dict):
-    c.setFillColor(HexColor(theme["bg_color"]))
-    c.setStrokeColor(HexColor(theme["border_color"]))
-    c.setLineWidth(0.65)
-    c.roundRect(4, 4, CARD_W - 8, CARD_H - 8, radius=7, fill=1, stroke=1)
-
-    x, y = 14, CARD_H - 18
-    c.setFont(AMHARIC_FONT, 4.8); c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(x, y, "ስልክ ቁጥር | Phone Number")
-    c.setFont("Helvetica-Bold", 6.2); c.setFillColor(HexColor(theme["text_color"]))
-    c.drawString(x, y - 6.5, data["phone"])
-
-    y -= 15
-    c.setFont(AMHARIC_FONT, 4.8); c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(x, y, "ዜግነት | Nationality")
-    c.setFont(AMHARIC_BOLD, 6.2); c.setFillColor(HexColor(theme["text_color"]))
-    c.drawString(x, y - 6.5, "ኢትዮጵያዊ")
-    c.setFont("Helvetica-Bold", 5.5)
-    c.drawString(x, y - 13, "Ethiopian")
-
-    y -= 22
-    c.setFont(AMHARIC_FONT, 4.8); c.setFillColor(HexColor(theme["label_color"]))
-    c.drawString(x, y, "አድራሻ | Address")
-    c.setFont(AMHARIC_BOLD, 5.8); c.setFillColor(HexColor(theme["text_color"]))
-    c.drawString(x, y - 7, data["region_local"])
-    c.setFont("Helvetica", 5.2)
-    c.drawString(x, y - 13, data["region_en"])
-    c.setFont(AMHARIC_BOLD, 5.8)
-    c.drawString(x, y - 20, data["zone_local"])
-    c.setFont("Helvetica", 5.2)
-    c.drawString(x, y - 26, data["zone_en"])
-    c.setFont(AMHARIC_BOLD, 5.8)
-    c.drawString(x, y - 33, data["woreda_local"])
-    c.setFont("Helvetica", 5.2)
-    c.drawString(x, y - 39, data["woreda_en"])
-
-    c.setStrokeColor(HexColor(theme["border_color"]))
-    c.roundRect(x, 15, 76, 13, radius=2.5, fill=0, stroke=1)
-    c.setFont("Helvetica-Bold", 5.8); c.setFillColor(HexColor(theme["text_color"]))
-    c.drawString(x + 4, 19.5, f"FIN: {data['fin']}")
-
-    qr_payload = generate_fayda_encrypted_qr_payload(data, photo_bytes)
-    qr_buf = generate_crisp_qr(qr_payload)
-    c.drawImage(ImageReader(qr_buf), 96, 23, width=135, height=122)
-
-    c.setFont("Helvetica-Bold", 5.2); c.setFillColor(HexColor("#334155"))
-    c.drawString(CARD_W - 55, 11, f"SN: {data['sn']}")
+    c.setFont("Helvetica-Bold", 5.8); c.setFillColor(HexColor("#06281D"))
+    c.drawCentredString(142, 33, data["fan_code"])
+    c.drawImage(ImageReader(bc_buf), 90, 18, width=105, height=13)
 
 # -------------------------------------------------------------------------
-# 9. ዋና ሜኑ
+# 11. Back Side Rendering (ከነ ሙሉ የታችኛው Disclaimer ጽሑፍ)
+# -------------------------------------------------------------------------
+def draw_card_back(c, data: dict, photo_bytes: bytes):
+    bg_buf = get_dual_tone_card_background()
+    c.drawImage(ImageReader(bg_buf), 0, 0, width=CARD_W, height=CARD_H)
+
+    c.setStrokeColor(HexColor("#86EFAC"))
+    c.setLineWidth(0.65)
+    c.roundRect(3, 3, CARD_W - 6, CARD_H - 6, radius=6, fill=0, stroke=1)
+
+    x, y = 14, CARD_H - 18
+    # ስልክ
+    c.setFont(AMHARIC_FONT, 4.8); c.setFillColor(HexColor("#92400E"))
+    c.drawString(x, y, "ስልክ | Phone Number")
+    c.setFont("Helvetica-Bold", 6.8); c.setFillColor(HexColor("#06281D"))
+    c.drawString(x, y - 7.5, data["phone"])
+
+    y -= 17
+    # ዜግነት
+    c.setFont(AMHARIC_FONT, 4.8); c.setFillColor(HexColor("#92400E"))
+    c.drawString(x, y, "ዜግነት | Nationality")
+    c.setFont(AMHARIC_FONT, 3.5); c.setFillColor(HexColor("#B45309"))
+    c.drawString(x, y - 4.5, "(በራስ የተገለጸ/በውል የተሰጠ | Self Declared)")
+    c.setFont(AMHARIC_BOLD, 6.8); c.setFillColor(HexColor("#06281D"))
+    c.drawString(x, y - 12, "ኢትዮጵያዊ  |  Ethiopian")
+
+    y -= 23
+    # አድራሻ
+    c.setFont(AMHARIC_FONT, 4.8); c.setFillColor(HexColor("#92400E"))
+    c.drawString(x, y, "አድራሻ | Address")
+    c.setFont(AMHARIC_BOLD, 6.5); c.setFillColor(HexColor("#06281D"))
+    c.drawString(x, y - 7.5, data["region_local"])
+    c.setFont("Helvetica-Bold", 5.8)
+    c.drawString(x, y - 13.5, data["region_en"])
+    c.setFont(AMHARIC_BOLD, 6.5)
+    c.drawString(x, y - 21, data["zone_local"])
+    c.setFont("Helvetica-Bold", 5.8)
+    c.drawString(x, y - 27, data["zone_en"])
+    c.setFont(AMHARIC_BOLD, 6.5)
+    c.drawString(x, y - 34.5, data["woreda_local"])
+    c.setFont("Helvetica-Bold", 5.8)
+    c.drawString(x, y - 40.5, data["woreda_en"])
+
+    # FIN Box
+    c.setFont(AMHARIC_FONT, 3.8); c.setFillColor(HexColor("#4B8B70"))
+    c.drawString(x, 24, "ፋይዳ")
+    c.drawString(x, 19, "መለያ ቁጥር")
+    c.setStrokeColor(HexColor("#6EE7B7"))
+    c.roundRect(x + 18, 16.5, 76, 12, radius=1.5, fill=0, stroke=1)
+    c.setFont("Helvetica-Bold", 6.2); c.setFillColor(HexColor("#06281D"))
+    c.drawString(x + 22, 20, f"FIN {data['fin']}")
+
+    # Crisp QR Code
+    qr_payload = generate_fayda_encrypted_qr_payload(data, photo_bytes)
+    qr_buf = generate_crisp_qr(qr_payload)
+    c.drawImage(ImageReader(qr_buf), 115, 26, width=118, height=118)
+
+    # የታችኛው ሙሉ Disclaimer ጽሑፍ (በአማርኛ እና በእንግሊዝኛ)
+    c.saveState()
+    c.setFont(AMHARIC_FONT, 3.2); c.setFillColor(HexColor("#1A3A2F"))
+    c.drawString(10, 10, "ይህ መታወቂያ የጠፋበት ካገኘ በአቅራቢያው ላለ ፖሊስ ጣቢያ ወይም ለተቋሙ ያስረክቡ። ለተጨማሪ 9779 ላይ ይደውሉ ወይም id.et/cardprint ይጎብኙ።")
+    c.setFont("Helvetica", 3.2)
+    c.drawString(10, 5.5, "If lost and found, please return to nearby police station or to the institution. Call 9779 or visit id.et/cardprint for more")
+
+    # SN ቁጥር በስተቀኝ
+    c.setFont("Helvetica-Bold", 4.8); c.setFillColor(HexColor("#06281D"))
+    c.drawRightString(CARD_W - 10, 7.5, f"SN: {data['sn']}")
+    c.restoreState()
+
+# -------------------------------------------------------------------------
+# 12. Main Menu Keyboard
 # -------------------------------------------------------------------------
 def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("✅ Get PDF 1", "✅ Get PDF 2", "⚠️ Get PDF 3")
+    markup.row("✅ Get PDF 1")
     markup.row("My Balance / አሁን ያለኝ", "Add Payment / ክፍያ ጨምር")
     markup.row("🔑 Resend(forget) FAN/FIN", "🔄 Reset / እንደገና ጀምር")
     return markup
 
 # -------------------------------------------------------------------------
-# 10. Start Command & Analytics
+# 13. Handlers & Flow Management
 # -------------------------------------------------------------------------
 @bot.message_handler(commands=['start'])
 def handle_start(message):
@@ -786,12 +921,12 @@ def handle_start(message):
             "📌 **የአድሚን ትዕዛዝ፦** `/analytics`"
         )
     else:
-        bonus_msg = "🎁 **እንኳን ደስ አለዎት! 1 ነጻ የካርድ ማውጫ ቦነስ (1 Free Bounce) አግኝተዋል።**\n\n" if free_used == 0 else ""
+        bonus_msg = "🎁 **እንኳን ደስ አለዎት! 1 ነጻ የካርድ ማውጫ ቦነስ አግኝተዋል።**\n\n" if free_used == 0 else ""
         welcome_text = (
             f"👋 **እንኳን ወደ ዲጂታል መታወቂያ ማዘጋጃ ቦት በደህና መጡ!**\n\n"
             f"{bonus_msg}"
             f"💰 **የአሁኑ ቀሪ ሂሳብዎ፦** `{bal:.2f} ETB`\n\n"
-            "ለመጀመር ከታች ካሉት አዝራሮች አንዱን ይምረጡ፦"
+            "ለመጀመር ከታች **«✅ Get PDF 1»** የሚለውን ይጫኑ፦"
         )
     safe_send_message(chat_id, welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
@@ -803,30 +938,19 @@ def handle_analytics_command(message):
         return
 
     stats = get_system_analytics()
-    theme_text = "".join([f"   • {theme}: `{cnt}` ካርዶች\n" for theme, cnt in stats.get("theme_breakdown", [])])
-    if not theme_text:
-        theme_text = "   • ምንም ካርድ እስካሁን አልተመረተም\n"
-
     dashboard_text = (
         "📊 **Dires Hub Bot — የአስተዳዳሪ ዳሽቦርድ (Admin Analytics)**\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "👥 **የተጠቃሚዎች መረጃ፦**\n"
-        f"• ጠቅላላ የተመዘገቡ: `{stats.get('total_users', 0)}`\n"
+        f"• ጠቅላላ የተመዘገቡ ተጠቃሚዎች: `{stats.get('total_users', 0)}`\n"
         f"• ነጻ ካርድ የተጠቀሙ: `{stats.get('paid_tier_users', 0)}`\n"
-        f"• በተጠቃሚዎች እጅ ያለ ባላንስ: `{stats.get('outstanding_balances', 0.0):.2f} ETB`\n\n"
-        "🪪 **የካርድ ስታትስቲክስ፦**\n"
-        f"• ጠቅላላ የተመረቱ: `{stats.get('total_cards', 0)}`\n"
-        f"{theme_text}\n"
-        "💰 **የገቢ ማጠቃለያ፦**\n"
-        f"• የተረጋገጡ ክፍያዎች: `{stats.get('total_tx_count', 0)}`\n"
+        f"• በተጠቃሚዎች እጅ ያለ ባላንስ: `{stats.get('outstanding_balances', 0.0):.2f} ETB`\n"
+        f"• ጠቅላላ የተመረቱ ካርዶች: `{stats.get('total_cards', 0)}`\n"
+        f"• የተረጋገጡ ክፍያዎች (Tx): `{stats.get('total_tx_count', 0)}`\n"
         f"• **ጠቅላላ የተሰበሰበ ገቢ:** `{stats.get('total_income', 0.0):.2f} ETB`\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
     safe_send_message(chat_id, dashboard_text, parse_mode="Markdown")
 
-# -------------------------------------------------------------------------
-# 11. የአዝራሮች አስተናጋጅ
-# -------------------------------------------------------------------------
 def action_reset(message):
     chat_id = message.chat.id
     bot.clear_step_handler_by_chat_id(chat_id)
@@ -875,26 +999,25 @@ def action_resend(message):
     if msg:
         bot.register_next_step_handler(msg, step_search_record)
 
-def action_pdf_generation(message, theme_name):
+def action_pdf_generation(message):
     chat_id = message.chat.id
     bot.clear_step_handler_by_chat_id(chat_id)
     if chat_id not in user_data_store:
         user_data_store[chat_id] = {}
-    user_data_store[chat_id]["theme"] = theme_name
 
     if chat_id == ADMIN_CHAT_ID:
-        start_card_creation_flow(chat_id, theme_name)
+        start_card_creation_flow(chat_id)
         return
 
     bal, free_used = get_user_status(chat_id)
 
     if free_used == 0:
-        safe_send_message(chat_id, f"🎁 **እንኳን ደስ አለዎት! {theme_name} በነጻ ቦነስዎ (1 Free Bounce) እየተዘጋጀ ነው።**", parse_mode="Markdown")
-        start_card_creation_flow(chat_id, theme_name)
+        safe_send_message(chat_id, "🎁 **እንኳን ደስ አለዎት! በነጻ ቦነስዎ ካርድዎ እየተዘጋጀ ነው።**", parse_mode="Markdown")
+        start_card_creation_flow(chat_id)
         return
 
     if bal >= PRICE_PER_CARD:
-        start_card_creation_flow(chat_id, theme_name)
+        start_card_creation_flow(chat_id)
         return
 
     qty_markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -904,7 +1027,6 @@ def action_pdf_generation(message, theme_name):
 
     prompt = (
         f"⚠️ **ክፍያ ያስፈልጋል!**\n\n"
-        f"🎨 ቴምፕሌት፦ **{theme_name}**\n"
         f"የአሁኑ ቀሪ ሂሳብዎ፦ `{bal:.2f} ETB`\n\n"
         f"• **Telebirr**: `{TELEBIRR_ACCOUNT}`\n"
         f"• **CBE**: `{CBE_ACCOUNT}`\n\n"
@@ -940,9 +1062,6 @@ def step_choose_quantity(message):
     if msg:
         bot.register_next_step_handler(msg, step_verify_payment_receipt)
 
-# -------------------------------------------------------------------------
-# 12. ደረሰኝ ማረጋገጫና ወደ ቀጣይ ደረጃ ማስተላለፊያ
-# -------------------------------------------------------------------------
 def step_verify_payment_receipt(message):
     chat_id = message.chat.id
     if check_and_route_button(message):
@@ -1004,7 +1123,6 @@ def step_verify_payer_info(message):
     record_used_receipt(tx_id, chat_id, amount_to_credit, sender_name, sender_phone)
     add_user_balance(chat_id, amount_to_credit)
 
-    # ለአድሚን ማሳወቂያ መላክ (ከበስተጀርባ thread እንዳያቆመው)
     notify_admin(
         f"💵 **አዲስ ክፍያ ተረጋግጧል!**\n\n"
         f"👤 ከፋይ: `{sender_name}`\n"
@@ -1015,23 +1133,19 @@ def step_verify_payer_info(message):
     )
 
     safe_send_message(chat_id, f"✅ **ክፍያዎ ተረጋግጧል!** `{amount_to_credit:.2f} ETB` ተጨምሯል።\n\nወዲያውኑ ወደ ካርድ መስሪያው ደረጃ እናልፋለን...")
-    
-    theme_key = user_data_store.get(chat_id, {}).get("theme", "PDF 1")
-    # ያለምንም መቆራረጥ በቀጥታ ወደ 1ኛው ደረጃ መላክ
-    start_card_creation_flow(chat_id, theme_key)
+    start_card_creation_flow(chat_id)
 
 # -------------------------------------------------------------------------
-# 13. የመረጃ መቀበያ ደረጃዎች
+# 14. የመረጃ መቀበያ ደረጃዎች
 # -------------------------------------------------------------------------
-def start_card_creation_flow(chat_id, theme_key):
+def start_card_creation_flow(chat_id):
     bot.clear_step_handler_by_chat_id(chat_id)
     if chat_id not in user_data_store:
         user_data_store[chat_id] = {}
-    user_data_store[chat_id]["theme"] = theme_key
 
     msg = safe_send_message(
         chat_id,
-        f"🎨 **{theme_key} ተመርጧል!**\n\n1️⃣ እባክዎ ሙሉ **ስምዎን በአማርኛ** ያስገቡ (ምሳሌ፡ ዲረስ ጎባሌ መለሰ)፦",
+        "🎨 **ዲጂታል መታወቂያ ካርድ ዝግጅት፦**\n\n1️⃣ እባክዎ ሙሉ **ስምዎን በአማርኛ** ያስገቡ (ምሳሌ፡ ዲረስ ጎባሌ መለሰ)፦",
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown"
     )
@@ -1082,7 +1196,7 @@ def step_fan_validation(message):
         return
 
     user_data_store[chat_id]["fan_code"] = text
-    prompt_dob = "3️⃣ **የትውልድ ቀንዎን በኢትዮጵያ ዘመን አቆጣጠር (E.C) ብቻ ያስገቡ፦**\n\n(ምሳሌ፡ 1994/10/29)"
+    prompt_dob = "3️⃣ **የትውልድ ቀንዎን በኢትዮጵያ ዘመን አቆጣጠር (E.C) ብቻ ያስገቡ፦**\n\n(ምሳሌ፡ 1994/09/29)"
     msg = safe_send_message(chat_id, prompt_dob, parse_mode="Markdown")
     if msg:
         bot.register_next_step_handler(msg, step_dob)
@@ -1248,7 +1362,7 @@ def step_woreda_select(message):
     msg = safe_send_message(
         chat_id,
         f"✅ ወረዳ፦ **{woreda_chosen}** ተመርጧል!\n\n"
-        "9️⃣ 📸 በመጨረሻም ለመታወቂያው የሚሆን ጥራት ያለው **የቁም ፎቶ** ይላኩ፦",
+        "9️⃣ 📸 በመጨረሻም ለመታወቂያው የሚሆን ማንኛውንም **የቁም ፎቶ** ይላኩ (ሙሉ ቁመት ፎቶ ቢሆን እንኳን ሲስተሙ ፊቱን በራሱ ቆርጦ ፓስፖርት ያደርገዋል)፦",
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown"
     )
@@ -1256,7 +1370,7 @@ def step_woreda_select(message):
         bot.register_next_step_handler(msg, step_photo)
 
 # -------------------------------------------------------------------------
-# 14. ፒዲኤፍ ማመንጫ እና መላኪያ
+# 15. ፎቶ ተቀብሎ በቅጽበት ፒዲኤፍ ማመንጨት
 # -------------------------------------------------------------------------
 def step_photo(message):
     chat_id = message.chat.id
@@ -1272,12 +1386,15 @@ def step_photo(message):
     status_msg = safe_send_message(chat_id, "⚡ ካርዱ በቅጽበት እየተዘጋጀ ነው...")
 
     file_info = bot.get_file(message.photo[-1].file_id)
-    photo_bytes = bot.download_file(file_info.file_path)
-    photo_reader = ImageReader(BytesIO(photo_bytes))
+    raw_photo_bytes = bot.download_file(file_info.file_path)
+
+    # ራስ-ሰር ፊቱንና ደረቱን አጉልቶ የሚቆርጥ ስማርት አሰራር (Smart Portrait Crop)
+    processed_photo_buf = prepare_portrait_photo(raw_photo_bytes)
+    photo_reader = ImageReader(processed_photo_buf)
+    ghost_reader = ImageReader(processed_photo_buf)
 
     u = user_data_store.get(chat_id, {})
-    theme = COLOR_THEMES.get(u.get("theme", "PDF 1"), COLOR_THEMES["PDF 1"])
-    fin_number = f"9243 {str(chat_id)[-4:]} 3827"
+    fin_number = f"4391 {str(chat_id)[-4:]} 4128"
 
     card_data = {
         "name_am": u.get("name_am", ""),
@@ -1286,8 +1403,9 @@ def step_photo(message):
         "dob_gc": u.get("dob_gc", ""),
         "sex_am": u.get("sex_am", ""),
         "sex_en": u.get("sex_en", ""),
-        "issued_gc": "2026/08/21",
-        "expiry_gc": "2034/May/01",
+        "issued_gc": "25/Oct/2026",
+        "expiry_ec": "13/02/2027",
+        "expiry_gc": "2034/Oct/23",
         "fan_code": u.get("fan_code", ""),
         "phone": u.get("phone", ""),
         "region_local": u.get("region_local", ""),
@@ -1302,9 +1420,9 @@ def step_photo(message):
 
     pdf_buffer = BytesIO()
     c = canvas.Canvas(pdf_buffer, pagesize=(CARD_W, CARD_H))
-    draw_card_front(c, card_data, photo_reader, theme)
+    draw_card_front(c, card_data, photo_reader, ghost_reader)
     c.showPage()
-    draw_card_back(c, card_data, photo_bytes, theme)
+    draw_card_back(c, card_data, raw_photo_bytes)
     c.showPage()
     c.save()
     pdf_buffer.seek(0)
@@ -1316,13 +1434,12 @@ def step_photo(message):
             chat_id,
             (filename, pdf_buffer.getvalue()),
             caption=(
-                f"🎉 **ካርድዎ ተዘጋጅቷል!**\n\n"
+                f"🎉 **የኢትዮጵያ ዲጂታል መታወቂያ ካርድዎ ተዘጋጅቷል!**\n\n"
                 f"👤 **ስም**: {card_data['name_am']} ({card_data['name_en']})\n"
                 f"🆔 **FAN**: `{card_data['fan_code']}`\n"
                 f"📅 **የትውልድ ቀን**: `{card_data['dob_ec']} (E.C) | {card_data['dob_gc']} (G.C)`\n"
                 f"📍 **አድራሻ**: {card_data['region_local']} | {card_data['zone_local']}\n"
-                f"🔑 **FIN**: `{fin_number}`\n"
-                f"🎨 **ቴምፕሌት**: {u.get('theme', 'PDF 1')}"
+                f"🔑 **FIN**: `{fin_number}`"
             ),
             reply_markup=get_main_keyboard(),
             parse_mode="Markdown"
@@ -1339,7 +1456,7 @@ def step_photo(message):
                 fan=card_data["fan_code"],
                 phone=card_data["phone"],
                 fin=fin_number,
-                theme=u.get("theme", "PDF 1")
+                theme="PDF 1"
             )
             deduct_for_card(chat_id)
             notify_admin(
@@ -1348,7 +1465,6 @@ def step_photo(message):
                 f"🆔 FAN: `{card_data['fan_code']}`\n"
                 f"📞 ስልክ: `{card_data['phone']}`\n"
                 f"📍 አድራሻ: {card_data['region_en']}, {card_data['zone_en']}\n"
-                f"🎨 ቴምፕሌት: {u.get('theme', 'PDF 1')}\n"
                 f"🆔 Chat ID: `{chat_id}`"
             )
         except Exception:
@@ -1363,7 +1479,7 @@ def step_photo(message):
             pass
 
 # -------------------------------------------------------------------------
-# 15. FAN/FIN መፈለጊያ
+# 16. FAN/FIN መፈለጊያ
 # -------------------------------------------------------------------------
 def step_search_record(message):
     chat_id = message.chat.id
@@ -1389,21 +1505,15 @@ def step_search_record(message):
         safe_send_message(chat_id, f"❌ በ `{query_text}` የተመዘገበ መረጃ አልተገኘም!", reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
 # -------------------------------------------------------------------------
-# 16. Universal Button Router
+# 17. Universal Button Router
 # -------------------------------------------------------------------------
 def check_and_route_button(message):
     if not message.text:
         return False
     txt = message.text.strip()
     
-    if "PDF 1" in txt:
-        action_pdf_generation(message, "PDF 1")
-        return True
-    elif "PDF 2" in txt:
-        action_pdf_generation(message, "PDF 2")
-        return True
-    elif "PDF 3" in txt:
-        action_pdf_generation(message, "PDF 3")
+    if "PDF" in txt:
+        action_pdf_generation(message)
         return True
     elif "Balance" in txt or "ያለኝ" in txt:
         action_balance(message)
@@ -1429,7 +1539,7 @@ def catch_all_messages(message):
     safe_send_message(message.chat.id, "እባክዎ ከታች ካሉት አዝራሮች አንዱን ይምረጡ፦", reply_markup=get_main_keyboard())
 
 # -------------------------------------------------------------------------
-# 17. Dummy Port Server (ለ Render)
+# 18. Dummy Port Server (ለ Render)
 # -------------------------------------------------------------------------
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -1443,14 +1553,14 @@ def run_dummy_server():
     server.serve_forever()
 
 # -------------------------------------------------------------------------
-# 18. Polling Loop
+# 19. Polling Loop
 # -------------------------------------------------------------------------
 def main():
     try:
         bot.remove_webhook()
     except Exception:
         pass
-    print("🚀 Dires Hub Bot (Seamless Payment-to-Card Transition) is running...")
+    print("🚀 Dires Hub Bot (Vibrant Mint-Green & Yellow Dual-Tone Engine) is running...")
     
     while True:
         try:
