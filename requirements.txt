@@ -1,5 +1,7 @@
-﻿pyTelegramBotAPI
+pyTelegramBotAPI
 reportlab
 pillow
 qrcode
 python-barcode
+opencv-python-headless
+numpy

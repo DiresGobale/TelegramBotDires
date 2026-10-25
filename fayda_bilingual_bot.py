@@ -3,6 +3,8 @@ import io
 import time
 import json
 import base64
+import hmac
+import hashlib
 import sqlite3
 import re
 import datetime
@@ -31,7 +33,14 @@ apihelper.READ_TIMEOUT = 90
 apihelper.RETRY_ON_ERROR = True
 
 TELEGRAM_BOT_TOKEN = "8732862832:AAHw0yxGvSsRJCk6HiR0b_uJ0gU2ee7hF0U"
-ADMIN_CHAT_ID = 8732862832
+ADMIN_CHAT_ID = 6192192453
+ADMIN_CHAT_IDS = {6192192453, 8732862832}
+
+def is_admin(chat_id):
+    try:
+        return int(chat_id) in ADMIN_CHAT_IDS
+    except Exception:
+        return False
 
 PRICE_PER_CARD = 5.0
 TELEBIRR_ACCOUNT = "0995774866"
@@ -84,10 +93,11 @@ CARD_H = 153.0
 # -------------------------------------------------------------------------
 def notify_admin(text: str):
     def _send():
-        try:
-            bot.send_message(ADMIN_CHAT_ID, text, parse_mode="Markdown")
-        except Exception:
-            pass
+        for aid in ADMIN_CHAT_IDS:
+            try:
+                bot.send_message(aid, text, parse_mode="Markdown")
+            except Exception:
+                pass
     threading.Thread(target=_send, daemon=True).start()
 
 def safe_send_message(chat_id, text, reply_markup=None, parse_mode=None, retries=2):
@@ -167,11 +177,14 @@ def parse_and_convert_dob(input_text: str):
         parts = text.split("|")
         return parts[0].strip(), parts[1].strip()
 
-    nums = re.findall(r'\d+', text)
+    nums = [int(n) for n in re.findall(r'\d+', text)]
     if len(nums) >= 3:
-        y, m, d = int(nums[0]), int(nums[1]), int(nums[2])
+        if nums[2] >= 1900 or (nums[2] > 31 and nums[0] <= 31):
+            d, m, y = nums[0], nums[1], nums[2]
+        else:
+            y, m, d = nums[0], nums[1], nums[2]
         if y < 100: y += 1900
-        ec_formatted = f"{y}/{str(m).zfill(2)}/{str(d).zfill(2)}"
+        ec_formatted = f"{str(d).zfill(2)}/{str(m).zfill(2)}/{y}"
         gc_formatted = ethiopian_to_gregorian(y, m, d)
         return ec_formatted, gc_formatted
     else:
@@ -375,7 +388,7 @@ def init_db():
 init_db()
 
 def get_user_status(chat_id: int):
-    if chat_id == ADMIN_CHAT_ID:
+    if is_admin(chat_id):
         return 999999.0, 0
     conn = get_db()
     c = conn.cursor()
@@ -391,7 +404,7 @@ def get_user_status(chat_id: int):
     return bal, free_used
 
 def deduct_for_card(chat_id: int):
-    if chat_id == ADMIN_CHAT_ID:
+    if is_admin(chat_id):
         return
     conn = get_db()
     c = conn.cursor()
@@ -526,7 +539,7 @@ def _get_face_cascades():
     _FACE_CASCADES = cascades
     return _FACE_CASCADES
 
-def prepare_portrait_photo(photo_bytes: bytes, target_width=320, target_height=420):
+def prepare_portrait_photo(photo_bytes: bytes, target_width=330, target_height=440):
     """ተጠቃሚው ሙሉ ቁመት (Full Body) ወይም ማንኛውንም ፎቶ ቢልክ ልክ እንደ ስታንዳርድ ፓስፖርት (ጭንቅላትና ደረቱ ጎልቶ) እንዲወጣ ያደርገዋል"""
     img = Image.open(BytesIO(photo_bytes)).convert("RGB")
     img = ImageOps.exif_transpose(img)
@@ -743,21 +756,57 @@ def generate_fayda_encrypted_qr_payload(data: dict, photo_bytes: bytes) -> str:
     try:
         with Image.open(BytesIO(photo_bytes)) as img:
             img = img.convert("RGB")
-            img.thumbnail((50, 60))
+            img.thumbnail((45, 55))
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=30)
-            img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+            img.save(buf, format="JPEG", quality=25)
+            img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
     except Exception:
         img_b64 = "UklGRvgCAABXRUJQVlA4IOwCAADQFgCdASpkAGQAPzmQv1avKicjqxPLgeAnCWMA0UXfYY1vQz3oq2WNvZlNSemNePDSXYgVE2"
 
+    clean_fin = str(data.get("fin", "")).replace(" ", "")
+    fan_code = str(data.get("fan_code", ""))
     gender_code = "F" if data.get("sex_en", "").upper().startswith("F") else "M"
-    header_b64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"
-    payload_raw = f'{{"sub":"{data.get("fan_code")}","name":"{data.get("name_en")}","fin":"{data.get("fin")}"}}'
-    payload_b64 = base64.urlsafe_b64encode(payload_raw.encode()).decode().rstrip("=")
-    sig_raw = f"{data.get('fan_code')}_{data.get('name_en')}_{time.time()}"
-    sig_b64 = base64.urlsafe_b64encode(sig_raw.encode() * 2).decode().rstrip("=")[:80]
+
+    header = {"alg": "HS256", "typ": "JWT", "kid": "fayda-root-signer-2026"}
+    header_b64 = base64.urlsafe_b64encode(json.dumps(header, separators=(",", ":")).encode()).decode().rstrip("=")
+
+    claims = {
+        "iss": "National ID Program - Ethiopia",
+        "sub": fan_code,
+        "fin": clean_fin,
+        "name": data.get("name_en", ""),
+        "name_am": data.get("name_am", ""),
+        "dob": data.get("dob_gc", ""),
+        "dob_eth": data.get("dob_ec", ""),
+        "gender": gender_code,
+        "phone": data.get("phone", ""),
+        "nationality": "Ethiopian",
+        "address": {
+            "region": data.get("region_en", ""),
+            "zone": data.get("zone_en", ""),
+            "woreda": data.get("woreda_en", "")
+        },
+        "issue_date": data.get("issued_gc", "25/Oct/2026"),
+        "expiry_date": data.get("expiry_gc", "2034/Oct/23"),
+        "sn": data.get("sn", ""),
+        "photo_hash": hashlib.sha256(photo_bytes).hexdigest()[:32],
+        "iat": int(time.time())
+    }
+
+    payload_json = json.dumps(claims, separators=(",", ":"), ensure_ascii=False)
+    payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode().rstrip("=")
+
+    SECRET_KEY = b"fayda_national_id_security_encryption_key_2026"
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+    signature = hmac.new(SECRET_KEY, signing_input, hashlib.sha256).digest()
+    sig_b64 = base64.urlsafe_b64encode(signature).decode().rstrip("=")
+
     jwt_token = f"{header_b64}.{payload_b64}.{sig_b64}"
-    return f"{img_b64}:DLT:{data.get('name_en')}:V:4:G:{gender_code}:A:{data.get('fan_code')}:D:{data.get('dob_gc')}:SIGN:{jwt_token}"
+    name_en = data.get("name_en", "")
+    name_am = data.get("name_am", "")
+    phone = data.get("phone", "")
+    dob_gc = data.get("dob_gc", "")
+    return f"{img_b64}:DLT:{name_en}:AM:{name_am}:FIN:{clean_fin}:FAN:{fan_code}:V:4:G:{gender_code}:P:{phone}:D:{dob_gc}:SIGN:{jwt_token}"
 
 def generate_crisp_barcode(code_text: str):
     code128 = barcode.get_barcode_class('code128')
@@ -782,7 +831,10 @@ def generate_crisp_qr(data_text: str):
 # -------------------------------------------------------------------------
 # 10. Front Side Rendering
 # -------------------------------------------------------------------------
-def draw_card_front(c, data: dict, photo_reader, ghost_reader):
+def draw_card_front(c, data: dict, photo_reader, ghost_reader, origin_x=0, origin_y=0):
+    c.saveState()
+    if origin_x != 0 or origin_y != 0:
+        c.translate(origin_x, origin_y)
     # ሁለቱንም ቀለሞች (Mint Green & Warm Yellow) የያዘውን ዳራ መሳል
     bg_buf = get_dual_tone_card_background()
     c.drawImage(ImageReader(bg_buf), 0, 0, width=CARD_W, height=CARD_H)
@@ -824,32 +876,26 @@ def draw_card_front(c, data: dict, photo_reader, ghost_reader):
     draw_exact_national_id_logo(c, CARD_W - 55, CARD_H - 18)
 
     # 4. ዋና የቁም ፎቶ (Smart Portrait Headshot)
-    photo_w, photo_h = 56, 73
-    photo_x, photo_y = 12, CARD_H - 110
+    photo_w, photo_h = 72, 96
+    photo_x, photo_y = 13, 26
     c.drawImage(photo_reader, photo_x, photo_y, width=photo_w, height=photo_h, preserveAspectRatio=True)
-    c.setStrokeColor(HexColor("#6EE7B7"))
-    c.setLineWidth(0.65)
-    c.rect(photo_x, photo_y, photo_w, photo_h, fill=0, stroke=1)
 
     # 5. ትንሽ የደህንነት ፎቶ (Ghost Portrait)
-    ghost_w, ghost_h = 19, 25
-    ghost_x, ghost_y = CARD_W - 44, 15
+    ghost_w, ghost_h = 21, 28
+    ghost_x, ghost_y = CARD_W - 46, 17
     c.drawImage(ghost_reader, ghost_x, ghost_y, width=ghost_w, height=ghost_h, preserveAspectRatio=True)
-    c.setStrokeColor(HexColor("#6EE7B7"))
-    c.setLineWidth(0.5)
-    c.rect(ghost_x, ghost_y, ghost_w, ghost_h, fill=0, stroke=1)
 
     # 6. የጎን ጽሑፍ (Date of Issue & Date)
     c.saveState()
-    c.translate(8.5, CARD_H - 105)
+    c.translate(8.5, 20)
     c.rotate(90)
     c.setFont(AMHARIC_FONT, 3.8)
     c.setFillColor(HexColor("#4B8B70"))
-    c.drawString(0, 0, f"የተሰጠበት ቀን  15/02/2019 Date of Issue       {data['issued_gc']}")
+    c.drawString(0, 0, f"የተሰጠበት ቀን  15/02/2019 Date of Issue : {data['issued_gc']}")
     c.restoreState()
 
     # 7. የካርዱ ዝርዝር መረጃዎች (በወርቃማ-ቡኒ ርዕሶች)
-    x_lbl = 76
+    x_lbl = 90
     cur_y = CARD_H - 35
     
     # ሙሉ ስም
@@ -871,9 +917,9 @@ def draw_card_front(c, data: dict, photo_reader, ghost_reader):
     c.drawString(x_lbl, cur_y, f"{data['dob_ec']}  |  {data['dob_gc']}")
 
     cur_y -= 8.5
-    # ጾታ
+    # ፆታ
     c.setFont(AMHARIC_FONT, 4.6); c.setFillColor(HexColor("#92400E"))
-    c.drawString(x_lbl, cur_y, "ጾታ | Sex")
+    c.drawString(x_lbl, cur_y, "ፆታ | Sex")
     cur_y -= 6.2
     c.setFont(AMHARIC_BOLD, 6.5); c.setFillColor(HexColor("#06281D"))
     c.drawString(x_lbl, cur_y, data["sex_am"])
@@ -883,7 +929,7 @@ def draw_card_front(c, data: dict, photo_reader, ghost_reader):
     cur_y -= 8.5
     # የሚያበቃበት ቀን
     c.setFont(AMHARIC_FONT, 4.6); c.setFillColor(HexColor("#92400E"))
-    c.drawString(x_lbl, cur_y, "የሚያበቃበት ቀን | Date of Expiry")
+    c.drawString(x_lbl, cur_y, "የሚያበቃበት ቀን | Date of Expire")
     cur_y -= 6.2
     c.setFont("Helvetica-Bold", 6.5); c.setFillColor(HexColor("#06281D"))
     c.drawString(x_lbl, cur_y, f"{data['expiry_ec']} | {data['expiry_gc']}")
@@ -893,20 +939,24 @@ def draw_card_front(c, data: dict, photo_reader, ghost_reader):
 
     # 9. ባርኮድ እና FAN
     c.setFont(AMHARIC_FONT, 4.2); c.setFillColor(HexColor("#4B8B70"))
-    c.drawString(76, 32, "ካርድ")
-    c.drawString(76, 26, "ቁጥር")
+    c.drawString(x_lbl, 30, "ካርድ")
+    c.drawString(x_lbl, 25, "ቁጥር")
     c.setFont("Helvetica-Bold", 4.2)
-    c.drawString(76, 20, "FAN")
+    c.drawString(x_lbl, 20, "FAN")
 
     bc_buf = generate_crisp_barcode(data["fan_code"])
     c.setFont("Helvetica-Bold", 5.8); c.setFillColor(HexColor("#06281D"))
-    c.drawCentredString(142, 33, data["fan_code"])
-    c.drawImage(ImageReader(bc_buf), 90, 18, width=105, height=13)
+    c.drawCentredString(x_lbl + 52, 31, data["fan_code"])
+    c.drawImage(ImageReader(bc_buf), x_lbl + 14, 17, width=78, height=13)
+    c.restoreState()
 
 # -------------------------------------------------------------------------
 # 11. Back Side Rendering (ከነ ሙሉ የታችኛው Disclaimer ጽሑፍ)
 # -------------------------------------------------------------------------
-def draw_card_back(c, data: dict, photo_bytes: bytes):
+def draw_card_back(c, data: dict, photo_bytes: bytes, origin_x=0, origin_y=0):
+    c.saveState()
+    if origin_x != 0 or origin_y != 0:
+        c.translate(origin_x, origin_y)
     bg_buf = get_dual_tone_card_background()
     c.drawImage(ImageReader(bg_buf), 0, 0, width=CARD_W, height=CARD_H)
 
@@ -926,7 +976,7 @@ def draw_card_back(c, data: dict, photo_bytes: bytes):
     c.setFont(AMHARIC_FONT, 4.8); c.setFillColor(HexColor("#92400E"))
     c.drawString(x, y, "ዜግነት | Nationality")
     c.setFont(AMHARIC_FONT, 3.5); c.setFillColor(HexColor("#B45309"))
-    c.drawString(x, y - 4.5, "(በራስ የተገለጸ/በውል የተሰጠ | Self Declared)")
+    c.drawString(x, y - 4.5, "(በተገለፀው መሰረት | Self Declared)")
     c.setFont(AMHARIC_BOLD, 6.8); c.setFillColor(HexColor("#06281D"))
     c.drawString(x, y - 12, "ኢትዮጵያዊ  |  Ethiopian")
 
@@ -950,11 +1000,16 @@ def draw_card_back(c, data: dict, photo_bytes: bytes):
     # FIN Box
     c.setFont(AMHARIC_FONT, 3.8); c.setFillColor(HexColor("#4B8B70"))
     c.drawString(x, 24, "ፋይዳ")
-    c.drawString(x, 19, "መለያ ቁጥር")
-    c.setStrokeColor(HexColor("#6EE7B7"))
-    c.roundRect(x + 18, 16.5, 76, 12, radius=1.5, fill=0, stroke=1)
-    c.setFont("Helvetica-Bold", 6.2); c.setFillColor(HexColor("#06281D"))
-    c.drawString(x + 22, 20, f"FIN {data['fin']}")
+    c.drawString(x, 19, "መለያ ቁጥር |")
+    c.setFillColor(HexColor("#FFFFFF"))
+    c.setStrokeColor(HexColor("#CBD5E1"))
+    c.setLineWidth(0.6)
+    c.roundRect(x + 23, 16.5, 78, 12, radius=2, fill=1, stroke=1)
+    
+    clean_fin = str(data.get('fin', '')).replace(' ', '')
+    spaced_fin = ' '.join(clean_fin)
+    c.setFont("Helvetica-Bold", 5.6); c.setFillColor(HexColor("#06281D"))
+    c.drawString(x + 26, 20.2, f"FIN {spaced_fin}")
 
     # Crisp QR Code
     qr_payload = generate_fayda_encrypted_qr_payload(data, photo_bytes)
@@ -964,13 +1019,14 @@ def draw_card_back(c, data: dict, photo_bytes: bytes):
     # የታችኛው ሙሉ Disclaimer ጽሑፍ (በአማርኛ እና በእንግሊዝኛ)
     c.saveState()
     c.setFont(AMHARIC_FONT, 3.2); c.setFillColor(HexColor("#1A3A2F"))
-    c.drawString(10, 10, "ይህ መታወቂያ የጠፋበት ካገኘ በአቅራቢያው ላለ ፖሊስ ጣቢያ ወይም ለተቋሙ ያስረክቡ። ለተጨማሪ 9779 ላይ ይደውሉ ወይም id.et/cardprint ይጎብኙ።")
+    c.drawString(10, 10, "ይህ መታወቂያ የጠፋ ከሆነ በአቅራቢያዎ ላለ ፖሊስ ጣቢያ ወይም ለተቋሙ ያስረክቡ። ለተጨማሪ መረጃ 9779 ላይ ይደውሉ ወይም id.et/cardprint ይጎብኙ።")
     c.setFont("Helvetica", 3.2)
     c.drawString(10, 5.5, "If lost and found, please return to nearby police station or to the institution. Call 9779 or visit id.et/cardprint for more")
 
     # SN ቁጥር በስተቀኝ
     c.setFont("Helvetica-Bold", 4.8); c.setFillColor(HexColor("#06281D"))
     c.drawRightString(CARD_W - 10, 7.5, f"SN: {data['sn']}")
+    c.restoreState()
     c.restoreState()
 
 # -------------------------------------------------------------------------
@@ -996,7 +1052,7 @@ def handle_start(message):
     user_data_store[chat_id] = {}
     bal, free_used = get_user_status(chat_id)
 
-    if chat_id != ADMIN_CHAT_ID:
+    if not is_admin(chat_id):
         notify_admin(
             f"🔔 **አዲስ ተጠቃሚ ቦቱን ከፍቷል!**\n\n"
             f"👤 **ስም:** {user_name}\n"
@@ -1005,7 +1061,7 @@ def handle_start(message):
             f"💰 **ባላንስ:** `{bal:.2f} ETB`"
         )
 
-    if chat_id == ADMIN_CHAT_ID:
+    if is_admin(chat_id):
         welcome_text = (
             "👑 **እንኳን ደህና መጡ ክቡር አድሚን ዲረስ!**\n\n"
             "እርስዎ ያለ ምንም ክፍያ ያልተገደበ (Unlimited) ካርዶችን በነጻ ማውጣት ይችላሉ።\n\n"
@@ -1024,7 +1080,7 @@ def handle_start(message):
 @bot.message_handler(commands=['analytics', 'stats', 'admin'])
 def handle_analytics_command(message):
     chat_id = message.chat.id
-    if chat_id != ADMIN_CHAT_ID:
+    if not is_admin(chat_id):
         safe_send_message(chat_id, "⛔ ይህ ትዕዛዝ ለአስተዳዳሪ ብቻ የተፈቀደ ነው።")
         return
 
@@ -1052,7 +1108,7 @@ def action_balance(message):
     chat_id = message.chat.id
     bot.clear_step_handler_by_chat_id(chat_id)
     bal, free_used = get_user_status(chat_id)
-    if chat_id == ADMIN_CHAT_ID:
+    if is_admin(chat_id):
         safe_send_message(chat_id, "👑 **ክቡር አድሚን ዲረስ፦** እርስዎ ያልተገደበ (Unlimited) ነጻ መዳረሻ አለዎት።", reply_markup=get_main_keyboard(), parse_mode="Markdown")
         return
     bonus_status = "✅ ገና አልተጠቀሙበትም" if free_used == 0 else "❌ ተጠቅመዋል"
@@ -1096,7 +1152,7 @@ def action_pdf_generation(message):
     if chat_id not in user_data_store:
         user_data_store[chat_id] = {}
 
-    if chat_id == ADMIN_CHAT_ID:
+    if is_admin(chat_id):
         start_card_creation_flow(chat_id)
         return
 
@@ -1280,7 +1336,7 @@ def step_fan_validation(message):
             bot.register_next_step_handler(msg, step_fan_validation)
         return
 
-    if chat_id != ADMIN_CHAT_ID and is_fan_registered(text):
+    if not is_admin(chat_id) and is_fan_registered(text):
         msg = safe_send_message(chat_id, "🚫 **ይህ FAN ቁጥር ቀደም ሲል ሌላ ሰው ተጠቅሞበታል!** እባክዎ የእራስዎን FAN ያስገቡ፦")
         if msg:
             bot.register_next_step_handler(msg, step_fan_validation)
@@ -1334,7 +1390,7 @@ def step_phone(message):
         return
 
     text = message.text.strip() if message.text else ""
-    clean_phone = re.sub(r'[\s\-]', '', text)
+    clean_phone = re.sub(r'[\s\-\+]', '', text)
 
     if not (clean_phone.isdigit() and len(clean_phone) >= 9):
         msg = safe_send_message(chat_id, "⚠️ እባክዎ ትክክለኛ ስልክ ቁጥር ያስገቡ፦")
@@ -1342,7 +1398,7 @@ def step_phone(message):
             bot.register_next_step_handler(msg, step_phone)
         return
 
-    if chat_id != ADMIN_CHAT_ID and is_phone_registered(clean_phone):
+    if not is_admin(chat_id) and is_phone_registered(clean_phone):
         msg = safe_send_message(chat_id, "🚫 **ይህ ስልክ ቁጥር ቀድሞ በሌላ ካርድ ላይ ተመዝግቧል!** እባክዎ ያልተመዘገበ የራስዎን ስልክ ያስገቡ፦")
         if msg:
             bot.register_next_step_handler(msg, step_phone)
@@ -1488,32 +1544,33 @@ def step_photo(message):
     fin_number = f"4391 {str(chat_id)[-4:]} 4128"
 
     card_data = {
-        "name_am": u.get("name_am", ""),
-        "name_en": u.get("name_en", ""),
-        "dob_ec": u.get("dob_ec", ""),
-        "dob_gc": u.get("dob_gc", ""),
-        "sex_am": u.get("sex_am", ""),
-        "sex_en": u.get("sex_en", ""),
+        "name_am": u.get("name_am") or "ዲረስ ጎባሌ መለሰ",
+        "name_en": u.get("name_en") or "Dires Gobale Melese",
+        "dob_ec": u.get("dob_ec") or "29/09/1994",
+        "dob_gc": u.get("dob_gc") or "2002/06/06",
+        "sex_am": u.get("sex_am") or "ወንድ",
+        "sex_en": u.get("sex_en") or "Male",
         "issued_gc": "25/Oct/2026",
         "expiry_ec": "13/02/2027",
         "expiry_gc": "2034/Oct/23",
-        "fan_code": u.get("fan_code", ""),
-        "phone": u.get("phone", ""),
-        "region_local": u.get("region_local", ""),
-        "region_en": u.get("region_en", ""),
-        "zone_local": u.get("zone_local", ""),
-        "zone_en": u.get("zone_en", ""),
-        "woreda_local": u.get("woreda_local", ""),
-        "woreda_en": u.get("woreda_en", ""),
-        "fin": fin_number,
-        "sn": str(int(time.time()))[-7:]
+        "fan_code": u.get("fan_code") or "4580956384014394",
+        "phone": u.get("phone") or "0969597627",
+        "region_local": u.get("region_local") or "አማራ",
+        "region_en": u.get("region_en") or "Amhara",
+        "zone_local": u.get("zone_local") or "ማዕከላዊ ጎንደር",
+        "zone_en": u.get("zone_en") or "Central Gonder",
+        "woreda_local": u.get("woreda_local") or "ታች አርማጭሆ",
+        "woreda_en": u.get("woreda_en") or "Tachi Armachiho",
+        "fin": u.get("fin") or fin_number,
+        "sn": u.get("sn") or str(int(time.time()))[-7:]
     }
 
+    PAGE_W = CARD_W * 2 + 12
+    PAGE_H = CARD_H
     pdf_buffer = BytesIO()
-    c = canvas.Canvas(pdf_buffer, pagesize=(CARD_W, CARD_H))
-    draw_card_front(c, card_data, photo_reader, ghost_reader)
-    c.showPage()
-    draw_card_back(c, card_data, raw_photo_bytes)
+    c = canvas.Canvas(pdf_buffer, pagesize=(PAGE_W, PAGE_H))
+    draw_card_front(c, card_data, photo_reader, ghost_reader, origin_x=0, origin_y=0)
+    draw_card_back(c, card_data, raw_photo_bytes, origin_x=CARD_W + 12, origin_y=0)
     c.showPage()
     c.save()
     pdf_buffer.seek(0)
@@ -1635,12 +1692,36 @@ def catch_all_messages(message):
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
+        self.send_header("Access-Control-Allow-Headers", "*")
         self.end_headers()
-        self.wfile.write(b"Dires Fayda Bot is Live and Authentic!")
+        resp = json.dumps({"status": "online", "bot": "Dires Fayda Hub", "message": "Bot is Live and Accessible Everywhere 24/7!"})
+        self.wfile.write(resp.encode("utf-8"))
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+    print(f"🌐 HTTP Health Server is listening on 0.0.0.0:{port} (Accessible Everywhere)")
     server.serve_forever()
 
 # -------------------------------------------------------------------------
