@@ -501,31 +501,122 @@ def get_system_analytics():
 # -------------------------------------------------------------------------
 # 8. ራስ-ሰር የፎቶ ማስተካከያ (Smart Crop: Full Body to Passport Headshot)
 # -------------------------------------------------------------------------
+_FACE_CASCADES = None
+
+def _get_face_cascades():
+    global _FACE_CASCADES
+    if _FACE_CASCADES is not None:
+        return _FACE_CASCADES
+    cascades = []
+    try:
+        import cv2
+        cascade_names = [
+            "haarcascade_frontalface_default.xml",
+            "haarcascade_frontalface_alt2.xml",
+            "haarcascade_profileface.xml"
+        ]
+        for name in cascade_names:
+            cpath = os.path.join(cv2.data.haarcascades, name)
+            if os.path.exists(cpath):
+                clf = cv2.CascadeClassifier(cpath)
+                if not clf.empty():
+                    cascades.append(clf)
+    except Exception:
+        pass
+    _FACE_CASCADES = cascades
+    return _FACE_CASCADES
+
 def prepare_portrait_photo(photo_bytes: bytes, target_width=320, target_height=420):
-    """ተጠቃሚው ሙሉ ቁመት (Full Body) ፎቶ ቢልክ እንኳን ፊቱንና ደረቱን ፈልጎ የፓስፖርት ፎቶ ያደርገዋል"""
+    """ተጠቃሚው ሙሉ ቁመት (Full Body) ወይም ማንኛውንም ፎቶ ቢልክ ልክ እንደ ስታንዳርድ ፓስፖርት (ጭንቅላትና ደረቱ ጎልቶ) እንዲወጣ ያደርገዋል"""
     img = Image.open(BytesIO(photo_bytes)).convert("RGB")
     img = ImageOps.exif_transpose(img)
     w, h = img.size
 
-    # ሙሉ የቆመ ሰው ከሆነ (ረጅም ፎቶ) የላይኛውን 50% ብቻ ወስዶ ፊቱን አጉልቶ ያወጣል
-    if h > w * 1.2:
-        crop_h = int(w * 1.35)
-        if crop_h < h:
-            img = img.crop((0, 0, w, crop_h))
-            w, h = img.size
-
     target_ratio = target_width / target_height
-    current_ratio = w / h
 
-    if current_ratio > target_ratio:
-        new_w = int(h * target_ratio)
-        offset = (w - new_w) // 2
-        img = img.crop((offset, 0, offset + new_w, h))
+    found_face = False
+    fx, fy, fw, fh = 0, 0, 0, 0
+
+    try:
+        cascades = _get_face_cascades()
+        if cascades:
+            import cv2
+            import numpy as np
+            arr = np.array(img)
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            all_faces = []
+            for casc in cascades:
+                faces = casc.detectMultiScale(
+                    gray,
+                    scaleFactor=1.1,
+                    minNeighbors=4,
+                    minSize=(max(30, int(w * 0.05)), max(30, int(h * 0.03)))
+                )
+                if len(faces) > 0:
+                    all_faces.extend(faces)
+            if len(all_faces) > 0:
+                fx, fy, fw, fh = max(all_faces, key=lambda b: b[2] * b[3])
+                found_face = True
+    except Exception:
+        found_face = False
+
+    if found_face:
+        cx = fx + fw // 2
+        cy = fy + fh // 2
+
+        # ፓስፖርት ቅርጽ፦ ፊቱ ~37%-38% የፎቶውን ቁመት እንዲይዝ፣ ከጭንቅላት በላይ ተገቢ ቦታ፣ ከታች ደረትና ትከሻ እንዲወጣ
+        crop_h = int(fh * 2.65)
+        crop_w = int(crop_h * target_ratio)
+
+        if crop_w < int(fw * 1.85):
+            crop_w = int(fw * 1.85)
+            crop_h = int(crop_w / target_ratio)
+
+        if crop_w > w:
+            crop_w = w
+            crop_h = int(crop_w / target_ratio)
+        if crop_h > h:
+            crop_h = h
+            crop_w = int(crop_h * target_ratio)
+
+        x1 = int(cx - crop_w / 2)
+        y1 = int(cy - crop_h * 0.40)
+
+        if x1 < 0:
+            x1 = 0
+        elif x1 + crop_w > w:
+            x1 = max(0, w - crop_w)
+
+        if y1 < 0:
+            y1 = 0
+        elif y1 + crop_h > h:
+            y1 = max(0, h - crop_h)
+
+        crop_box = (x1, y1, min(w, x1 + crop_w), min(h, y1 + crop_h))
     else:
-        new_h = int(w / target_ratio)
-        img = img.crop((0, 0, w, new_h))
+        # ሙሉ ቁመት (Full Body) ፎቶ ሆኖ ፊቱ በግልጽ ካልታወቀ የላይኛውን ክፍል (ጭንቅላትና ደረት) ይወስዳል
+        if h > w * 1.40:
+            crop_h = int(h * 0.40)
+            crop_w = int(crop_h * target_ratio)
+            if crop_w > w:
+                crop_w = w
+                crop_h = int(crop_w / target_ratio)
+            x1 = max(0, (w - crop_w) // 2)
+            y1 = int(h * 0.02)
+            if y1 + crop_h > h:
+                y1 = 0
+            crop_box = (x1, y1, x1 + crop_w, y1 + crop_h)
+        else:
+            current_ratio = w / h
+            if current_ratio > target_ratio:
+                new_w = int(h * target_ratio)
+                offset = (w - new_w) // 2
+                crop_box = (offset, 0, offset + new_w, h)
+            else:
+                new_h = int(w / target_ratio)
+                crop_box = (0, 0, w, new_h)
 
-    img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+    img = img.crop(crop_box).resize((target_width, target_height), Image.Resampling.LANCZOS)
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=95)
     buf.seek(0)
