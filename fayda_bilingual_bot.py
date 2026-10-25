@@ -7,6 +7,7 @@ import sqlite3
 import re
 import datetime
 import threading
+import urllib.request
 from io import BytesIO
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
@@ -22,7 +23,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # -------------------------------------------------------------------------
-# 1. API Configuration & High Timeout Setup
+# 1. API Configuration & Admin Settings
 # -------------------------------------------------------------------------
 apihelper.CONNECT_TIMEOUT = 90
 apihelper.READ_TIMEOUT = 90
@@ -40,42 +41,65 @@ CBE_NAME = "Dires Gobale (ዲረስ ጎባሌ)"
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=True, num_threads=60)
 
 # -------------------------------------------------------------------------
-# 2. Network-Resilient Message Sender (Freezing Prevention)
-# -------------------------------------------------------------------------
-def safe_send_message(chat_id, text, reply_markup=None, parse_mode=None, retries=3):
-    """Network drop holeo retry kore message pouchhe dewar jonno helper"""
-    for attempt in range(retries):
-        try:
-            return bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
-        except Exception as e:
-            if attempt == retries - 1:
-                print(f"Failed to send message to {chat_id}: {e}")
-                return None
-            time.sleep(1)
-
-# -------------------------------------------------------------------------
-# 3. Font Setup
+# 2. የአማርኛ ፎንት አወራረድ (አንዴ ወርዶ ይቀመጣል፤ ድጋሚ አይወርድም)
 # -------------------------------------------------------------------------
 AMHARIC_FONT = "Helvetica"
 AMHARIC_BOLD = "Helvetica-Bold"
 
-nyala_path = "C:/Windows/Fonts/nyala.ttf"
-if not os.path.exists(nyala_path):
-    nyala_path = "nyala.ttf"
+def setup_amharic_font():
+    global AMHARIC_FONT, AMHARIC_BOLD
+    font_filename = "NotoSansEthiopic-Regular.ttf"
+    font_bold_filename = "NotoSansEthiopic-Bold.ttf"
+    
+    regular_url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansEthiopic/NotoSansEthiopic-Regular.ttf"
+    bold_url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansEthiopic/NotoSansEthiopic-Bold.ttf"
 
-if os.path.exists(nyala_path):
     try:
-        pdfmetrics.registerFont(TTFont("Nyala", nyala_path))
-        AMHARIC_FONT = "Nyala"
-        AMHARIC_BOLD = "Nyala"
-    except Exception:
-        pass
+        if not os.path.exists(font_filename):
+            urllib.request.urlretrieve(regular_url, font_filename)
+        if not os.path.exists(font_bold_filename):
+            urllib.request.urlretrieve(bold_url, font_bold_filename)
+
+        pdfmetrics.registerFont(TTFont("AmharicFont", font_filename))
+        pdfmetrics.registerFont(TTFont("AmharicBold", font_bold_filename))
+        AMHARIC_FONT = "AmharicFont"
+        AMHARIC_BOLD = "AmharicBold"
+    except Exception as e:
+        if os.path.exists("C:/Windows/Fonts/nyala.ttf"):
+            try:
+                pdfmetrics.registerFont(TTFont("Nyala", "C:/Windows/Fonts/nyala.ttf"))
+                AMHARIC_FONT = "Nyala"
+                AMHARIC_BOLD = "Nyala"
+            except Exception:
+                pass
+
+setup_amharic_font()
 
 CARD_W = 242.6
 CARD_H = 153.0
 
 # -------------------------------------------------------------------------
-# 4. Amharic Transliteration
+# 3. የአድሚን ማሳወቂያ እና አስተማማኝ መልእክት መላኪያ
+# -------------------------------------------------------------------------
+def notify_admin(text: str):
+    def _send():
+        try:
+            bot.send_message(ADMIN_CHAT_ID, text, parse_mode="Markdown")
+        except Exception:
+            pass
+    threading.Thread(target=_send, daemon=True).start()
+
+def safe_send_message(chat_id, text, reply_markup=None, parse_mode=None, retries=2):
+    for attempt in range(retries):
+        try:
+            return bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception:
+            if attempt == retries - 1:
+                return None
+            time.sleep(0.5)
+
+# -------------------------------------------------------------------------
+# 4. አማርኛን ወደ እንግሊዝኛ መቀየሪያ
 # -------------------------------------------------------------------------
 AMH_TO_ENG = {
     'ሀ': 'Ha', 'ሁ': 'Hu', 'ሂ': 'Hi', 'ሃ': 'Ha', 'ሄ': 'He', 'ህ': 'H', 'ሆ': 'Ho',
@@ -113,7 +137,7 @@ AMH_TO_ENG = {
     'ፐ': 'Pe', 'ፑ': 'Pu', 'ፒ': 'Pi', 'ፓ': 'Pa', 'ፔ': 'Pe', 'ፕ': 'P', 'ፖ': 'Po'
 }
 
-def transliterate_amharic(text: str) -> str:
+def transliterate_text(text: str) -> str:
     words = text.strip().split()
     eng_words = []
     for w in words:
@@ -124,7 +148,7 @@ def transliterate_amharic(text: str) -> str:
     return " ".join(eng_words)
 
 # -------------------------------------------------------------------------
-# 5. Date Conversion (E.C to G.C)
+# 5. የቀን ስሌት
 # -------------------------------------------------------------------------
 def ethiopian_to_gregorian(ec_year: int, ec_month: int, ec_day: int):
     try:
@@ -153,49 +177,150 @@ def parse_and_convert_dob(input_text: str):
         return text, text
 
 # -------------------------------------------------------------------------
-# 6. Administrative Hierarchy
+# 6. የኢትዮጵያ ክልሎች፣ ዞኖች እና ወረዳዎች
 # -------------------------------------------------------------------------
 ETHIOPIA_REGIONS = {
-    "አማራ": {
+    "አማራ (Amhara)": {
+        "local": "አማራ",
         "en": "Amhara",
         "zones": {
-            "ምዕራብ ጎጃም": ["ባህር ዳር ዙሪያ", "መኤጫ", "ይልማና ዴንሳ", "ቡሬ", "ደቡብ አቸፈር", "ሰሜን አቸፈር", "ደምበጫ", "ጃቢ ጥህናን", "ሰከላ", "ቁሪት"],
-            "ምስራቅ ጎጃም": ["ደብረ ማርቆስ", "ማቻከል", "ደጀን", "አነደድ", "እናርጅ እናናውጋ", "እነብሴ ሳር ምድር", "ሰደዴ", "ጉዛምን", "ባሶ ሊበን", "አዋበል"],
-            "አዊ (ጎጃም)": ["እንጅባራ", "ፋግታ ለኮማ", "ባንጃ", "አንከሻ ጓጉሳ", "ጓንጓ", "ጃዊ", "ዚገም"],
-            "ሰሜን ወሎ": ["ወልዲያ", "ላሊበላ", "ራያ ቆቦ", "ጉባ ላፍቶ", "ሀብሩ", "መቄት", "ዋድላ", "ዳውንት", "ቡግና", "ግደን"],
-            "ደቡብ ወሎ": ["ደሴ", "ኮምቦልቻ", "ቃሉ", "ኩታበር", "ተሁለደሬ", "አልቡኮ", "ወረባቡ", "ለጋምቦ", "ሳይንት", "ጃማ", "ወገል ጤና"],
-            "ሰሜን ሸዋ (አማራ)": ["ደብረ ብርሃን", "አንኮበር", "ባሶና ወራና", "ምንጃር ሸንኮራ", "ሞረትና ጅሩ", "ሲያደብርና ዋዩ", "በረኸት", "አንጎለላና ጠራ", "ኤፍራታና ግድም", "ቀወት"],
-            "ማዕከላዊ ጎንደር": ["ታች አርማጭሆ", "ላይ አርማጭሆ", "ጭልጋ", "ጎንደር ዙሪያ", "ደምቢያ", "ምዕራብ ደምቢያ", "ምስራቅ ደምቢያ", "ተከዜ"],
-            "ሰሜን ጎንደር": ["ደባርቅ", "ዳባት", "በየዳ", "ጃናሞራ", "ጠለምት", "አዲ አርቃይ"],
-            "ደቡብ ጎንደር": ["ደብረ ታቦር", "ፎገራ", "ፋርታ", "ላይ ጋይንት", "ታች ጋይንት", "እስቴ", "ስማዳ", "አንደበት", "ድሬዳ"]
+            "ምዕራብ ጎጃም": {"en": "West Gojjam", "woredas": ["ባህር ዳር ዙሪያ", "መኤጫ", "ይልማና ዴንሳ", "ቡሬ", "ደቡብ አቸፈር", "ሰሜን አቸፈር", "ደምበጫ", "ጃቢ ጥህናን", "ሰከላ", "ቁሪት"]},
+            "ምስራቅ ጎጃም": {"en": "East Gojjam", "woredas": ["ደብረ ማርቆስ", "ማቻከል", "ደጀን", "አነደድ", "እናርጅ እናናውጋ", "እነብሴ ሳር ምድር", "ሰደዴ", "ጉዛምን", "ባሶ ሊበን", "አዋበል"]},
+            "አዊ (ጎጃም)": {"en": "Awi (Gojjam)", "woredas": ["እንጅባራ", "ፋግታ ለኮማ", "ባንጃ", "አንከሻ ጓጉሳ", "ጓንጓ", "ጃዊ", "ዚገም"]},
+            "ሰሜን ወሎ": {"en": "North Wollo", "woredas": ["ወልዲያ", "ላሊበላ", "ራያ ቆቦ", "ጉባ ላፍቶ", "ሀብሩ", "መቄት", "ዋድላ", "ዳውንት", "ቡግና", "ግደን"]},
+            "ደቡብ ወሎ": {"en": "South Wollo", "woredas": ["ደሴ", "ኮምቦልቻ", "ቃሉ", "ኩታበር", "ተሁለደሬ", "አልቡኮ", "ወረባቡ", "ለጋምቦ", "ሳይንት", "ጃማ", "ወገል ጤና"]},
+            "ሰሜን ሸዋ (አማራ)": {"en": "North Shewa", "woredas": ["ደብረ ብርሃን", "አንኮበር", "ባሶና ወራና", "ምንጃር ሸንኮራ", "ሞረትና ጅሩ", "ሲያደብርና ዋዩ", "በረኸት", "አንጎለላና ጠራ", "ኤፍራታና ግድም", "ቀወት"]},
+            "ማዕከላዊ ጎንደር": {"en": "Central Gondar", "woredas": ["ታች አርማጭሆ", "ላይ አርማጭሆ", "ጭልጋ", "ጎንደር ዙሪያ", "ደምቢያ", "ምዕራብ ደምቢያ", "ምስራቅ ደምቢያ", "ተከዜ"]},
+            "ሰሜን ጎንደር": {"en": "North Gondar", "woredas": ["ደባርቅ", "ዳባት", "በየዳ", "ጃናሞራ", "ጠለምት", "አዲ አርቃይ"]},
+            "ደቡብ ጎንደር": {"en": "South Gondar", "woredas": ["ደብረ ታቦር", "ፎገራ", "ፋርታ", "ላይ ጋይንት", "ታች ጋይንት", "እስቴ", "ስማዳ", "አንደበት", "ድሬዳ"]},
+            "ዋግ ኽምራ": {"en": "Wag Hemra", "woredas": ["ሰቆጣ", "ዝቋላ", "ሳህላ", "ደሃና", "ገዘብላ"]}
         }
     },
-    "ኦሮሚያ": {
+    "Oromiyaa (ኦሮሚያ)": {
+        "local": "Oromiyaa",
         "en": "Oromia",
         "zones": {
-            "ኦሮሚያ ልዩ ዞን (ሸዋ)": ["ቡራዩ", "ሰበታ", "ዱከም", "ሱሉልታ", "ገላን", "ሆለታ"],
-            "ምስራቅ ሸዋ": ["አዳማ", "ቢሾፍቱ", "ሞጆ", "ሉሜ", "ቦሰት", "አዳሚ ቱሉ"],
-            "ሰሜን ሸዋ (ኦሮሚያ)": ["ፍቼ", "ደብረ ሊባኖስ", "ዋራ ጃርሶ", "ያያ ጉለሌ"],
-            "ምዕራብ ሸዋ": ["አምቦ", "ጀልዱ", "ቶኬ ኩታዬ", "ደንዲ"],
-            "ምዕራብ አርሲ": ["ሻሸመኔ", "ኮሬ", "ነጌሌ አርሲ", "ዶዶላ"]
+            "Godina Addaa Oromiyaa": {"en": "Oromia Special Zone", "woredas": ["Buraayyuu", "Sabbataa", "Dukam", "Sulultaa", "Galaan", "Hoolota"]},
+            "Shawaa Bahaa": {"en": "East Shewa", "woredas": ["Adaamaa", "Bishooftuu", "Mojo", "Luume", "Bosat", "Adaamii Tulluu"]},
+            "Shawaa Kaabaa": {"en": "North Shewa", "woredas": ["Fiichee", "Dabra Libaanos", "Waara Jaarsoo", "Yaayaa Gullallee"]},
+            "Shawaa Dhihaa": {"en": "West Shewa", "woredas": ["Amboo", "Jaldu", "Tookkee Kuttaaye", "Dandi"]},
+            "Arsii Dhihaa": {"en": "West Arsi", "woredas": ["Shaashamannee", "Kofalee", "Nageellee Arsi", "Doddola"]},
+            "Arsii": {"en": "Arsi", "woredas": ["Asallaa", "Ticho", "Diksiis", "Siree", "Zuwaay Dugda"]},
+            "Jimma": {"en": "Jimma Zone", "woredas": ["Jimma", "Aggaaroo", "Manna", "Gommaa", "Limmuu Saqqa"]},
+            "Harargee Bahaa": {"en": "East Hararghe", "woredas": ["Awadaay", "Haramaya", "Kombolcha", "Babile", "Fedis"]},
+            "Wallagga Dhihaa": {"en": "West Wollega", "woredas": ["Gimbi", "Nedjo", "Boji Dirmeji", "Ayira"]}
         }
     },
-    "አዲስ አበባ": {
+    "ትግራይ (Tigray)": {
+        "local": "ትግራይ",
+        "en": "Tigray",
+        "zones": {
+            "ዞባ መቐለ": {"en": "Mekelle Zone", "woredas": ["ሓወልቲ", "ዓዲ ሓቂ", "ቀዳማይ ወያነ", "ሰሜን", "ደቡብ"]},
+            "ምብራቕ ትግራይ": {"en": "Eastern Tigray", "woredas": ["ዓዲግራት", "ውቅሮ", "ጉሎ መኸዳ", "ኢሮብ", "ሳዕሲዕ ጻዕዳእምባ"]},
+            "ማእኸላይ ትግራይ": {"en": "Central Tigray", "woredas": ["ዓድዋ", "ኣኽሱም", "ታሕታይ ማይጨው", "ወርዒ ለኸ", "ናዕዴር ዓዴት"]},
+            "ደቡብ ትግራይ": {"en": "Southern Tigray", "woredas": ["ማይጨው", "ራያ ዓዘቦ", "እንዳመኾኒ", "ኦፍላ", "ራያ ጨርጨር"]},
+            "ሰሜን ምዕራብ ትግራይ": {"en": "North Western Tigray", "woredas": ["ሽረ እንዳስላሴ", "ታሕታይ ቆራሮ", "መድበይ ዛና", "ኣስገደ ጽምብላ"]}
+        }
+    },
+    "አዲስ አበባ (Addis Ababa)": {
+        "local": "አዲስ አበባ",
         "en": "Addis Ababa",
         "zones": {
-            "አዲስ አበባ": ["ቦሌ", "ቂርቆስ", "አራዳ", "የካ", "ንፋስ ስልክ", "ኮልፌ ቀራኒዮ", "ሊደታ", "ጉለሌ", "አዲስ ከተማ", "አካቂ ቃሊቲ", "ለሚ ኩራ"]
+            "ክፍለ ከተማ": {"en": "Sub-City", "woredas": ["ቦሌ", "ቂርቆስ", "አራዳ", "የካ", "ንፋስ ስልክ ላፍቶ", "ኮልፌ ቀራኒዮ", "ሊደታ", "ጉለሌ", "አዲስ ከተማ", "አካቂ ቃሊቲ", "ለሚ ኩራ"]}
         }
     },
-    "ሲዳማ": {
+    "Soomaali (ሶማሌ)": {
+        "local": "Dowlad Degaanka Soomaalida",
+        "en": "Somali",
+        "zones": {
+            "Shabeele": {"en": "Shabelle Zone", "woredas": ["Godey", "Qalaafe", "Mustaxiil", "Feerfeer", "Beer-caano"]},
+            "Faafan": {"en": "Fafan Zone", "woredas": ["Jigjiga", "Wajaale", "Awbare", "Babili", "Gursum", "Tuliguuleed"]},
+            "Siti": {"en": "Siti Zone", "woredas": ["Shinile", "Ayesha", "Dembel", "Erer", "Mieso"]},
+            "Doollo": {"en": "Dollo Zone", "woredas": ["Wardheer", "Boh", "Danood", "Galadi", "Daratoole"]},
+            "Jarar": {"en": "Jarar Zone", "woredas": ["Degehabur", "Birkod", "Bilcil Bur", "Gunagado"]}
+        }
+    },
+    "Qafar (አፋር)": {
+        "local": "Qafar Rakaakay",
+        "en": "Afar",
+        "zones": {
+            "Awsi Rasu (Zone 1)": {"en": "Awsi Rasu", "woredas": ["Asaita", "Dubti", "Afambo", "Chifra", "Mille"]},
+            "Kilbet Rasu (Zone 2)": {"en": "Kilbet Rasu", "woredas": ["Abala", "Berhale", "Dalol", "Koneba"]},
+            "Gabi Rasu (Zone 3)": {"en": "Gabi Rasu", "woredas": ["Awash Fentale", "Amibara", "Bure Mudaytu", "Geweane"]},
+            "Fanti Rasu (Zone 4)": {"en": "Fanti Rasu", "woredas": ["Ewa", "Golina", "Yalo", "Teru"]}
+        }
+    },
+    "Sidaama (ሲዳማ)": {
+        "local": "Sidaamu Dagoomi Gedo",
         "en": "Sidama",
         "zones": {
-            "ሲዳማ ዞን": ["ሀዋሳ", "ወንዶ ገነት", "ቦሪቻ", "ዳሌ", "አሌታ ወንዶ", "ይርጋለም"]
+            "Hawassa": {"en": "Hawassa City Admin", "woredas": ["Menehariya", "Tabor", "Hayk Dar", "Misraq", "Mehal"]},
+            "Sidama Zooni": {"en": "Sidama Zone", "woredas": ["Wondo Genet", "Aleta Wondo", "Borecha", "Daale", "Yirgalem", "Chuko", "Hula"]}
+        }
+    },
+    "ደቡብ ኢትዮጵያ (South Ethiopia)": {
+        "local": "ደቡብ ኢትዮጵያ",
+        "en": "South Ethiopia",
+        "zones": {
+            "ዎላይታ": {"en": "Wolayita Zone", "woredas": ["ሶዶ", "ቦዲቲ", "አረካ", "ዳሞት ጋሌ", "ዳሞት ወይዴ", "ሁምቦ", "ኦፋ"]},
+            "ጋሞ": {"en": "Gamo Zone", "woredas": ["አርባ ምንጭ", "ጨንቻ", "ዲታ", "ቦንኬ", "ሚርአብ አባያ", "ቁቻ"]},
+            "ጎፋ": {"en": "Gofa Zone", "woredas": ["ሳውላ", "ደሜ ጎፋ", "ዛላ", "ኡባ ደብረ ፀሐይ"]},
+            "ጌዴኦ": {"en": "Gedeo Zone", "woredas": ["ዲላ", "ይርጋጨፌ", "ወናጎ", "ቡሌ", "ኮቾሬ"]}
+        }
+    },
+    "ማዕከላዊ ኢትዮጵያ (Central Ethiopia)": {
+        "local": "ማዕከላዊ ኢትዮጵያ",
+        "en": "Central Ethiopia",
+        "zones": {
+            "ጉራጌ": {"en": "Gurage Zone", "woredas": ["ወልቂጤ", "እምድብር", "ቡታጅራ", "ጉመር", "እዣ", "ቸሃ", "አበሽጌ"]},
+            "ስልጤ": {"en": "Siltie Zone", "woredas": ["ወራቤ", "ዳሎቻ", "ሳንኩራ", "ሁልባራግ", "ላንፍሮ"]},
+            "ሀዲያ": {"en": "Hadiya Zone", "woredas": ["ሆሳዕና", "ሌሞ", "ሻሾጎ", "ሶሮ", "ሚሻ", "አናሌሞ"]},
+            "ከምባታ": {"en": "Kembata Zone", "woredas": ["ዱራሜ", "አንጋቻ", "ቃዲዳ ጋሚላ", "ዶዮገና"]}
+        }
+    },
+    "ደቡብ ምዕራብ ኢትዮጵያ (SW Ethiopia)": {
+        "local": "ደቡብ ምዕራብ ኢትዮጵያ",
+        "en": "South West Ethiopia",
+        "zones": {
+            "ካፋ": {"en": "Keffa Zone", "woredas": ["ቦንጋ", "ጊምቦ", "ዴቻ", "ጨና", "ገሻ", "ቴሎ"]},
+            "ቤንች ሸኮ": {"en": "Bench Sheko Zone", "woredas": ["ሚዛን አማን", "ደቡብ ቤንች", "ሰሜን ቤንች", "ሸኮ", "ጉራፈርዳ"]},
+            "ዳውሮ": {"en": "Dawro Zone", "woredas": ["ተርጫ", "ማሪቃ", "ሎማ", "ገነ ቦሳ", "ቶጫ"]}
+        }
+    },
+    "ቤንሻንጉል ጉሙዝ (Benishangul Gumuz)": {
+        "local": "ቤንሻንጉል ጉሙዝ",
+        "en": "Benishangul Gumuz",
+        "zones": {
+            "አሶሳ": {"en": "Assosa Zone", "woredas": ["አሶሳ", "ባምባሲ", "ሆሞሻ", "መንጌ", "ኩርሙክ", "ኦዳ ቡልዲግሉ"]},
+            "መተከል": {"en": "Metekel Zone", "woredas": ["ጊልገል በለስ", "ዳንጉር", "ጉባ", "ማንዱራ", "ዲባጤ", "ቡለን"]}
+        }
+    },
+    "ጋምቤላ (Gambella)": {
+        "local": "ጋምቤላ",
+        "en": "Gambella",
+        "zones": {
+            "አኙዋክ": {"en": "Anuak Zone", "woredas": ["ጋምቤላ ከተማ", "አቦቦ", "ጎግ", "ጆር"]},
+            "ኑዌር": {"en": "Nuer Zone", "woredas": ["ላሬ", "ጂካዎ", "ዋንቱዋ", "አኮቦ"]}
+        }
+    },
+    "ሐረሪ (Harari)": {
+        "local": "ሐረሪ",
+        "en": "Harari",
+        "zones": {
+            "ሐረር": {"en": "Harar City", "woredas": ["አሚር ኑር", "አባድር", "ሸንኮር", "ጂንኤላ", "ሶፊ", "ኤረር"]}
+        }
+    },
+    "ድሬዳዋ (Dire Dawa)": {
+        "local": "ድሬዳዋ",
+        "en": "Dire Dawa",
+        "zones": {
+            "አስተዳደር": {"en": "Administration", "woredas": ["ቀበሌ 01-09", "ገደይስ", "ዋሂል", "ለገሀሬ"]}
         }
     }
 }
 
 # -------------------------------------------------------------------------
-# 7. Database Layer (SQLite WAL Mode with Auto-Migration)
+# 7. Database Layer (SQLite WAL Mode)
 # -------------------------------------------------------------------------
 DB_FILE = "fayda_bot_users.db"
 
@@ -226,8 +351,8 @@ def init_db():
             chat_id INTEGER,
             name_am TEXT,
             name_en TEXT,
-            fan_code TEXT UNIQUE,
-            phone TEXT UNIQUE,
+            fan_code TEXT,
+            phone TEXT,
             fin_code TEXT,
             theme TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -250,7 +375,7 @@ init_db()
 
 def get_user_status(chat_id: int):
     if chat_id == ADMIN_CHAT_ID:
-        return 9999.0, 0
+        return 999999.0, 0
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT balance, free_used FROM users WHERE chat_id = ?", (chat_id,))
@@ -325,7 +450,7 @@ def save_card_record(chat_id, name_am, name_en, fan, phone, fin, theme):
     conn = get_db()
     c = conn.cursor()
     c.execute('''
-        INSERT OR REPLACE INTO card_records 
+        INSERT INTO card_records 
         (chat_id, name_am, name_en, fan_code, phone, fin_code, theme)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     ''', (chat_id, name_am, name_en, fan, phone, fin, theme))
@@ -373,7 +498,7 @@ def get_system_analytics():
     }
 
 # -------------------------------------------------------------------------
-# 8. Card Design Themes & Rendering
+# 8. ፈጣን ባርኮድ እና ኪውአር ማመንጫ (High-Speed Generation)
 # -------------------------------------------------------------------------
 COLOR_THEMES = {
     "PDF 1": {
@@ -392,13 +517,13 @@ COLOR_THEMES = {
 
 user_data_store = {}
 
-def generate_fayda_encrypted_qr_payload(data: dict, photo_path: str) -> str:
+def generate_fayda_encrypted_qr_payload(data: dict, photo_bytes: bytes) -> str:
     try:
-        with Image.open(photo_path) as img:
+        with Image.open(BytesIO(photo_bytes)) as img:
             img = img.convert("RGB")
-            img.thumbnail((55, 70))
+            img.thumbnail((50, 60))
             buf = io.BytesIO()
-            img.save(buf, format="WEBP", quality=22)
+            img.save(buf, format="JPEG", quality=30)
             img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
     except Exception:
         img_b64 = "UklGRvgCAABXRUJQVlA4IOwCAADQFgCdASpkAGQAPzmQv1avKicjqxPLgeAnCWMA0UXfYY1vQz3oq2WNvZlNSemNePDSXYgVE2"
@@ -415,7 +540,7 @@ def generate_fayda_encrypted_qr_payload(data: dict, photo_path: str) -> str:
 def generate_crisp_barcode(code_text: str):
     code128 = barcode.get_barcode_class('code128')
     writer = ImageWriter()
-    writer.dpi = 300
+    writer.dpi = 150  # ፈጣን እንዲሆን DPI ተስተካክሏል
     bc = code128(code_text, writer=writer)
     buf = BytesIO()
     bc.write(buf, options={"write_text": False, "quiet_zone": 1})
@@ -423,7 +548,7 @@ def generate_crisp_barcode(code_text: str):
     return buf
 
 def generate_crisp_qr(data_text: str):
-    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=4, border=1)
+    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=3, border=1)
     qr.add_data(data_text)
     qr.make(fit=True)
     img = qr.make_image(fill_color="#0F172A", back_color="white")
@@ -432,7 +557,7 @@ def generate_crisp_qr(data_text: str):
     buf.seek(0)
     return buf
 
-def draw_card_front(c, data: dict, photo_path: str, theme: dict):
+def draw_card_front(c, data: dict, photo_reader, theme: dict):
     c.setFillColor(HexColor(theme["bg_color"]))
     c.setStrokeColor(HexColor(theme["border_color"]))
     c.setLineWidth(0.65)
@@ -462,12 +587,12 @@ def draw_card_front(c, data: dict, photo_path: str, theme: dict):
     c.setFont("Helvetica-Bold", 4.2)
     c.drawCentredString(CARD_W - 20, CARD_H - 21.5, "FAYDA")
 
-    c.drawImage(photo_path, 18, CARD_H - 110, width=54, height=68, preserveAspectRatio=True)
+    c.drawImage(photo_reader, 18, CARD_H - 110, width=54, height=68, preserveAspectRatio=True)
     c.setStrokeColor(HexColor(theme["border_color"]))
     c.setLineWidth(0.7)
     c.rect(18, CARD_H - 110, 54, 68, fill=0, stroke=1)
 
-    c.drawImage(photo_path, CARD_W - 35, 18, width=17, height=22, preserveAspectRatio=True)
+    c.drawImage(photo_reader, CARD_W - 35, 18, width=17, height=22, preserveAspectRatio=True)
     c.rect(CARD_W - 35, 18, 17, 22, fill=0, stroke=1)
 
     c.saveState()
@@ -516,7 +641,7 @@ def draw_card_front(c, data: dict, photo_path: str, theme: dict):
     c.drawCentredString(142, 26, formatted_fan)
     c.drawImage(ImageReader(bc_buf), 90, 13, width=102, height=11)
 
-def draw_card_back(c, data: dict, photo_path: str, theme: dict):
+def draw_card_back(c, data: dict, photo_bytes: bytes, theme: dict):
     c.setFillColor(HexColor(theme["bg_color"]))
     c.setStrokeColor(HexColor(theme["border_color"]))
     c.setLineWidth(0.65)
@@ -540,15 +665,15 @@ def draw_card_back(c, data: dict, photo_path: str, theme: dict):
     c.setFont(AMHARIC_FONT, 4.8); c.setFillColor(HexColor(theme["label_color"]))
     c.drawString(x, y, "አድራሻ | Address")
     c.setFont(AMHARIC_BOLD, 5.8); c.setFillColor(HexColor(theme["text_color"]))
-    c.drawString(x, y - 7, data["region_am"])
+    c.drawString(x, y - 7, data["region_local"])
     c.setFont("Helvetica", 5.2)
     c.drawString(x, y - 13, data["region_en"])
     c.setFont(AMHARIC_BOLD, 5.8)
-    c.drawString(x, y - 20, data["zone_am"])
+    c.drawString(x, y - 20, data["zone_local"])
     c.setFont("Helvetica", 5.2)
     c.drawString(x, y - 26, data["zone_en"])
     c.setFont(AMHARIC_BOLD, 5.8)
-    c.drawString(x, y - 33, data["woreda_am"])
+    c.drawString(x, y - 33, data["woreda_local"])
     c.setFont("Helvetica", 5.2)
     c.drawString(x, y - 39, data["woreda_en"])
 
@@ -557,7 +682,7 @@ def draw_card_back(c, data: dict, photo_path: str, theme: dict):
     c.setFont("Helvetica-Bold", 5.8); c.setFillColor(HexColor(theme["text_color"]))
     c.drawString(x + 4, 19.5, f"FIN: {data['fin']}")
 
-    qr_payload = generate_fayda_encrypted_qr_payload(data, photo_path)
+    qr_payload = generate_fayda_encrypted_qr_payload(data, photo_bytes)
     qr_buf = generate_crisp_qr(qr_payload)
     c.drawImage(ImageReader(qr_buf), 96, 23, width=135, height=122)
 
@@ -565,7 +690,7 @@ def draw_card_back(c, data: dict, photo_path: str, theme: dict):
     c.drawString(CARD_W - 55, 11, f"SN: {data['sn']}")
 
 # -------------------------------------------------------------------------
-# 9. Main Menu Keyboard
+# 9. ዋና ሜኑ
 # -------------------------------------------------------------------------
 def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -575,24 +700,39 @@ def get_main_keyboard():
     return markup
 
 # -------------------------------------------------------------------------
-# 10. Core Commands
+# 10. Start Command & Analytics
 # -------------------------------------------------------------------------
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     chat_id = message.chat.id
+    user_name = message.from_user.first_name or "User"
+    username = f"@{message.from_user.username}" if message.from_user.username else "No username"
+
     bot.clear_step_handler_by_chat_id(chat_id)
     user_data_store[chat_id] = {}
     bal, free_used = get_user_status(chat_id)
 
+    if chat_id != ADMIN_CHAT_ID:
+        notify_admin(
+            f"🔔 **አዲስ ተጠቃሚ ቦቱን ከፍቷል!**\n\n"
+            f"👤 **ስም:** {user_name}\n"
+            f"🔗 **Username:** {username}\n"
+            f"🆔 **Chat ID:** `{chat_id}`\n"
+            f"💰 **ባላንስ:** `{bal:.2f} ETB`"
+        )
+
     if chat_id == ADMIN_CHAT_ID:
-        welcome_text = "👑 **እንኳን ደህና መጡ ክቡር አድሚን ዲረስ!**\n\nእርስዎ ያለ ምንም ክፍያ በፈለጉት ጊዜ ካርዶችን በነጻ ማውጣት ይችላሉ።\nየገቢና የተጠቃሚ ስታትስቲክስ ለማየት `/analytics` ብለው ይላኩ።"
+        welcome_text = (
+            "👑 **እንኳን ደህና መጡ ክቡር አድሚን ዲረስ!**\n\n"
+            "እርስዎ ያለ ምንም ክፍያ ያልተገደበ (Unlimited) ካርዶችን በነጻ ማውጣት ይችላሉ።\n\n"
+            "📌 **የአድሚን ትዕዛዝ፦** `/analytics`"
+        )
     else:
         bonus_msg = "🎁 **እንኳን ደስ አለዎት! 1 ነጻ የካርድ ማውጫ ቦነስ (1 Free Bounce) አግኝተዋል።**\n\n" if free_used == 0 else ""
         welcome_text = (
             f"👋 **እንኳን ወደ ዲጂታል መታወቂያ ማዘጋጃ ቦት በደህና መጡ!**\n\n"
             f"{bonus_msg}"
-            f"💰 **የአሁኑ ቀሪ ሂሳብዎ፦** `{bal:.2f} ETB`\n"
-            f"💡 *(የመጀመሪያውን 1 ነጻ ካርድ ከጨረሱ በኋላ ተጨማሪ ካርድ ለማውጣት በአንድ ካርድ 5 ብር ብቻ ክፍያ ይፈጸማል)*\n\n"
+            f"💰 **የአሁኑ ቀሪ ሂሳብዎ፦** `{bal:.2f} ETB`\n\n"
             "ለመጀመር ከታች ካሉት አዝራሮች አንዱን ይምረጡ፦"
         )
     safe_send_message(chat_id, welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
@@ -600,37 +740,35 @@ def handle_start(message):
 @bot.message_handler(commands=['analytics', 'stats', 'admin'])
 def handle_analytics_command(message):
     chat_id = message.chat.id
-    bot.clear_step_handler_by_chat_id(chat_id)
-    
     if chat_id != ADMIN_CHAT_ID:
-        safe_send_message(chat_id, "⛔ **ይቅርታ!** ይህ ትዕዛዝ ለአስተዳዳሪ (Admin) ብቻ የተፈቀደ ነው።", parse_mode="Markdown")
+        safe_send_message(chat_id, "⛔ ይህ ትዕዛዝ ለአስተዳዳሪ ብቻ የተፈቀደ ነው።")
         return
-    
+
     stats = get_system_analytics()
-    theme_text = ""
-    for theme_name, count in stats.get("theme_breakdown", []):
-        theme_text += f"   • {theme_name}: `{count}` ካርዶች\n"
+    theme_text = "".join([f"   • {theme}: `{cnt}` ካርዶች\n" for theme, cnt in stats.get("theme_breakdown", [])])
     if not theme_text:
         theme_text = "   • ምንም ካርድ እስካሁን አልተመረተም\n"
-        
+
     dashboard_text = (
         "📊 **Dires Hub Bot — የአስተዳዳሪ ዳሽቦርድ (Admin Analytics)**\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "👥 **የተጠቃሚዎች መረጃ፦**\n"
-        f"• ጠቅላላ የተመዘገቡ ተጠቃሚዎች: `{stats.get('total_users', 0)}`\n"
-        f"• ነጻ ካርዳቸውን የጨረሱ: `{stats.get('paid_tier_users', 0)}`\n"
+        f"• ጠቅላላ የተመዘገቡ: `{stats.get('total_users', 0)}`\n"
+        f"• ነጻ ካርድ የተጠቀሙ: `{stats.get('paid_tier_users', 0)}`\n"
         f"• በተጠቃሚዎች እጅ ያለ ባላንስ: `{stats.get('outstanding_balances', 0.0):.2f} ETB`\n\n"
         "🪪 **የካርድ ስታትስቲክስ፦**\n"
-        f"• ጠቅላላ የተመረቱ ካርዶች: `{stats.get('total_cards', 0)}`\n"
+        f"• ጠቅላላ የተመረቱ: `{stats.get('total_cards', 0)}`\n"
         f"{theme_text}\n"
-        "💰 **የፋይናንስና የገቢ ማጠቃለያ፦**\n"
-        f"• ጠቅላላ የተረጋገጡ ክፍያዎች (Tx): `{stats.get('total_tx_count', 0)}`\n"
+        "💰 **የገቢ ማጠቃለያ፦**\n"
+        f"• የተረጋገጡ ክፍያዎች: `{stats.get('total_tx_count', 0)}`\n"
         f"• **ጠቅላላ የተሰበሰበ ገቢ:** `{stats.get('total_income', 0.0):.2f} ETB`\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕒 *ሪፖርት የወጣበት ሰዓት: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
     safe_send_message(chat_id, dashboard_text, parse_mode="Markdown")
 
+# -------------------------------------------------------------------------
+# 11. የአዝራሮች አስተናጋጅ
+# -------------------------------------------------------------------------
 def action_reset(message):
     chat_id = message.chat.id
     bot.clear_step_handler_by_chat_id(chat_id)
@@ -641,12 +779,15 @@ def action_balance(message):
     chat_id = message.chat.id
     bot.clear_step_handler_by_chat_id(chat_id)
     bal, free_used = get_user_status(chat_id)
-    bonus_status = "✅ ገና አልተጠቀሙበትም (1 ነጻ ካርድ አለዎት)" if free_used == 0 else "❌ ተጠቅመዋል"
+    if chat_id == ADMIN_CHAT_ID:
+        safe_send_message(chat_id, "👑 **ክቡር አድሚን ዲረስ፦** እርስዎ ያልተገደበ (Unlimited) ነጻ መዳረሻ አለዎት።", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+        return
+    bonus_status = "✅ ገና አልተጠቀሙበትም" if free_used == 0 else "❌ ተጠቅመዋል"
     safe_send_message(
         chat_id,
         f"💰 **የአሁኑ ቀሪ ሂሳብዎ፦** `{bal:.2f} ETB`\n"
-        f"🎁 **የነጻ ካርድ ቦነስ (Free Bounce)፦** {bonus_status}\n\n"
-        f"💡 ለእያንዳንዱ ተጨማሪ ካርድ የሚቆረጠው ሂሳብ፦ `{PRICE_PER_CARD:.2f} ETB`",
+        f"🎁 **የነጻ ካርድ ቦነስ፦** {bonus_status}\n\n"
+        f"💡 ለእያንዳንዱ ተጨማሪ ካርድ፦ `{PRICE_PER_CARD:.2f} ETB`",
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown"
     )
@@ -656,13 +797,9 @@ def action_payment(message):
     bot.clear_step_handler_by_chat_id(chat_id)
     payment_info = (
         "💳 **የክፍያ መመሪያ (ተቀባይ: Dires Gobale)፦**\n\n"
-        f"1. **Telebirr**:\n"
-        f"   • ቁጥር፦ `{TELEBIRR_ACCOUNT}`\n"
-        f"   • ስም፦ `{TELEBIRR_NAME}`\n\n"
-        f"2. **CBE (የኢትዮጵያ ንግድ ባንክ)**:\n"
-        f"   • ሂሳብ ቁጥር፦ `{CBE_ACCOUNT}`\n"
-        f"   • ስም፦ `{CBE_NAME}`\n\n"
-        "ክፍያውን ፈጽመው ሲያበቁ የቴሌብር/የባንክ **የደረሰኝ ፎቶ (Screenshot)** እዚህ ይላኩ፤ ሲስተሙ በራሱ አረጋግጦ ሂሳብዎን ይሞላል።"
+        f"1. **Telebirr**: `{TELEBIRR_ACCOUNT}` ({TELEBIRR_NAME})\n"
+        f"2. **CBE**: `{CBE_ACCOUNT}` ({CBE_NAME})\n\n"
+        "ክፍያውን ፈጽመው ሲያበቁ የቴሌብር/የባንክ **የደረሰኝ ፎቶ (Screenshot)** እዚህ ይላኩ።"
     )
     msg = safe_send_message(chat_id, payment_info, reply_markup=get_main_keyboard(), parse_mode="Markdown")
     if msg:
@@ -673,8 +810,7 @@ def action_resend(message):
     bot.clear_step_handler_by_chat_id(chat_id)
     msg = safe_send_message(
         chat_id,
-        "🔍 **መረጃ መፈለጊያ (FAN / FIN Recovery)፦**\n\n"
-        "እባክዎ የተመዘገቡበትን **ስልክ ቁጥር** ወይም ባለ **16 አሃዝ FAN ቁጥርዎን** ያስገቡ፦",
+        "🔍 **መረጃ መፈለጊያ (FAN / FIN Recovery)፦**\n\nየተመዘገቡበትን **ስልክ ቁጥር** ወይም **16 አሃዝ FAN ቁጥርዎን** ያስገቡ፦",
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown"
     )
@@ -692,36 +828,27 @@ def action_pdf_generation(message, theme_name):
 
     bal, free_used = get_user_status(chat_id)
 
-    # 1. First card free bounce
     if free_used == 0:
         safe_send_message(chat_id, f"🎁 **እንኳን ደስ አለዎት! {theme_name} በነጻ ቦነስዎ (1 Free Bounce) እየተዘጋጀ ነው።**", parse_mode="Markdown")
         start_card_creation_flow(chat_id, theme_name)
         return
 
-    # 2. Paid user with balance
     if bal >= PRICE_PER_CARD:
         start_card_creation_flow(chat_id, theme_name)
         return
 
-    # 3. Paywall
     qty_markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     qty_markup.row("1 ካርድ (5 ብር)", "2 ካርድ (10 ብር)", "3 ካርድ (15 ብር)")
     qty_markup.row("5 ካርድ (25 ብር)", "10 ካርድ (50 ብር)", "20 ካርድ (100 ብር)")
     qty_markup.row("🔄 Reset / እንደገና ጀምር")
 
     prompt = (
-        f"⚠️ **ክፍያ ያስፈልጋል! መጀመሪያ ክፍያዎን ማረጋገጥ አለብዎት፦**\n"
-        f"*(You must confirm payment first!)*\n\n"
-        f"🎨 የመረጡት ቴምፕሌት፦ **{theme_name}**\n"
-        f"የመጀመሪያውን 1 ነጻ የካርድ ማውጫ ቦነስዎን ጨርሰዋል።\n"
+        f"⚠️ **ክፍያ ያስፈልጋል!**\n\n"
+        f"🎨 ቴምፕሌት፦ **{theme_name}**\n"
         f"የአሁኑ ቀሪ ሂሳብዎ፦ `{bal:.2f} ETB`\n\n"
-        "💳 **የመክፈያ አካውንቶች፦**\n"
-        f"• **Telebirr**: `{TELEBIRR_ACCOUNT}` ({TELEBIRR_NAME})\n"
-        f"• **CBE**: `{CBE_ACCOUNT}` ({CBE_NAME})\n\n"
-        "እባክዎ **ስንት ካርድ ማውጣት እንደሚፈልጉ ይምረጡ**፦\n\n"
-        "• 1 ካርድ = 5 ብር\n"
-        "• 5 ካርድ = 25 ብር\n"
-        "• 10 ካርድ = 50 ብር"
+        f"• **Telebirr**: `{TELEBIRR_ACCOUNT}`\n"
+        f"• **CBE**: `{CBE_ACCOUNT}`\n\n"
+        "እባክዎ **ስንት ካርድ ማውጣት እንደሚፈልጉ ይምረጡ**፦"
     )
     msg = safe_send_message(chat_id, prompt, reply_markup=qty_markup, parse_mode="Markdown")
     if msg:
@@ -740,26 +867,19 @@ def step_choose_quantity(message):
     user_data_store[chat_id]["cards_count"] = count
 
     payment_prompt = (
-        f"💳 **የክፍያ መጠየቂያ (Payment Invoice)፦**\n\n"
-        f"📊 **የተመረጠ የካርድ ብዛት**: `{count}` ካርድ\n"
-        f"💰 **ጠቅላላ የሚከፍሉት**: `{count} × 5 = {total_cost:.2f} ETB`\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "📌 **የመክፈያ አካውንቶች (ተቀባይ: Dires Gobale)፦**\n\n"
-        f"1. **Telebirr**:\n"
-        f"   • የስልክ ቁጥር፦ `{TELEBIRR_ACCOUNT}`\n"
-        f"   • ስም፦ `{TELEBIRR_NAME}`\n\n"
-        f"2. **CBE (የኢትዮጵያ ንግድ ባንክ)**:\n"
-        f"   • የሂሳብ ቁጥር፦ `{CBE_ACCOUNT}`\n"
-        f"   • ስም፦ `{CBE_NAME}`\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📥 **ደረጃ 1፦** ክፍያውን ፈጽመው ሲያበቁ የቴሌብር/የባንክ **የደረሰኝ ፎቶ (Screenshot)** እዚህ ይላኩ፦"
+        f"💳 **የክፍያ መጠየቂያ፦**\n\n"
+        f"📊 የተመረጠ: `{count}` ካርድ\n"
+        f"💰 ጠቅላላ ዋጋ: `{total_cost:.2f} ETB`\n\n"
+        f"• Telebirr: `{TELEBIRR_ACCOUNT}` ({TELEBIRR_NAME})\n"
+        f"• CBE: `{CBE_ACCOUNT}` ({CBE_NAME})\n\n"
+        "ክፍያውን ፈጽመው ሲያበቁ የደረሰኙን **ፎቶ (Screenshot)** እዚህ ይላኩ፦"
     )
     msg = safe_send_message(chat_id, payment_prompt, reply_markup=get_main_keyboard(), parse_mode="Markdown")
     if msg:
         bot.register_next_step_handler(msg, step_verify_payment_receipt)
 
 # -------------------------------------------------------------------------
-# 11. Payment Verification
+# 12. ደረሰኝ ማረጋገጫ
 # -------------------------------------------------------------------------
 def step_verify_payment_receipt(message):
     chat_id = message.chat.id
@@ -778,18 +898,13 @@ def step_verify_payment_receipt(message):
         return
 
     if is_receipt_already_used(tx_id):
-        msg = safe_send_message(chat_id, "🚫 **ይህ ደረሰኝ ቀደም ሲል አገልግሎት ላይ ውሏል!** እባክዎ አዲስ ክፍያ ፈጽመው ትክክለኛውን ደረሰኝ ይላኩ፦")
+        msg = safe_send_message(chat_id, "🚫 ይህ ደረሰኝ ቀደም ሲል ጥቅም ላይ ውሏል! እባክዎ አዲስ ደረሰኝ ይላኩ፦")
         if msg:
             bot.register_next_step_handler(msg, step_verify_payment_receipt)
         return
 
     user_data_store[chat_id]["temp_tx_id"] = tx_id
-
-    prompt_payer = (
-        "👤 **ደረጃ 2፦ በደረሰኙ ላይ የሚታየውን የከፋይ ሙሉ ስም እና ስልክ ቁጥር ያስገቡ፦**\n\n"
-        "💡 **ምሳሌ፦** `አበበ ከበደ - 0912345678`\n"
-        "*(ማስታወሻ፦ ያስገቡት ስም እና ስልክ በላኩት ደረሰኝ ላይ ካለው መረጃ ጋር በትክክል መመሳሰል አለበት)*"
-    )
+    prompt_payer = "👤 **በደረሰኙ ላይ የሚታየውን የከፋይ ሙሉ ስም እና ስልክ ቁጥር ያስገቡ፦**\n\n(ምሳሌ፡ አበበ ከበደ - 0912345678)"
     msg = safe_send_message(chat_id, prompt_payer, reply_markup=get_main_keyboard(), parse_mode="Markdown")
     if msg:
         bot.register_next_step_handler(msg, step_verify_payer_info)
@@ -817,7 +932,7 @@ def step_verify_payer_info(message):
             sender_phone = "0912345678"
 
     if len(sender_name) < 3:
-        msg = safe_send_message(chat_id, "⚠️ እባክዎ በደረሰኙ ላይ ያለውን ትክክለኛ **ሙሉ ስም እና ስልክ ቁጥር** ያስገቡ፦")
+        msg = safe_send_message(chat_id, "⚠️ እባክዎ ትክክለኛ ሙሉ ስም እና ስልክ ቁጥር ያስገቡ፦")
         if msg:
             bot.register_next_step_handler(msg, step_verify_payer_info)
         return
@@ -825,22 +940,21 @@ def step_verify_payer_info(message):
     record_used_receipt(tx_id, chat_id, amount_to_credit, sender_name, sender_phone)
     add_user_balance(chat_id, amount_to_credit)
 
-    safe_send_message(
-        chat_id,
-        f"✅ **ክፍያዎ በራስ-ሰር ተረጋግጧል!**\n\n"
-        f"👤 **ከፋይ**: `{sender_name}`\n"
-        f"📞 **የከፋይ ስልክ**: `{sender_phone}`\n"
-        f"💵 **የተጨመረ ሂሳብ**: `{amount_to_credit:.2f} ETB`\n"
-        f"🧾 **የደረሰኝ ቁጥር (TxID)**: `{tx_id}`\n\n"
-        "መረጃዎ ከደረሰኙ ጋር በትክክል ተመሳስሏል፤ አሁን በቀጥታ ወደ ካርድ መስሪያው ደረጃ እናልፋለን...",
-        parse_mode="Markdown"
+    notify_admin(
+        f"💵 **አዲስ ክፍያ ተረጋግጧል!**\n\n"
+        f"👤 ከፋይ: `{sender_name}`\n"
+        f"📞 ስልክ: `{sender_phone}`\n"
+        f"💰 መጠን: `{amount_to_credit:.2f} ETB`\n"
+        f"🧾 TxID: `{tx_id}`\n"
+        f"🆔 Chat ID: `{chat_id}`"
     )
 
+    safe_send_message(chat_id, f"✅ **ክፍያዎ ተረጋግጧል!** `{amount_to_credit:.2f} ETB` ተጨምሯል።")
     theme_key = user_data_store.get(chat_id, {}).get("theme", "PDF 1")
     start_card_creation_flow(chat_id, theme_key)
 
 # -------------------------------------------------------------------------
-# 12. Card Data Collection Steps
+# 13. የመረጃ መቀበያ ደረጃዎች
 # -------------------------------------------------------------------------
 def start_card_creation_flow(chat_id, theme_key):
     bot.clear_step_handler_by_chat_id(chat_id)
@@ -866,11 +980,11 @@ def step_name_am(message):
         return
 
     user_data_store[chat_id]["name_am"] = text
-    user_data_store[chat_id]["name_en"] = transliterate_amharic(text)
+    user_data_store[chat_id]["name_en"] = transliterate_text(text)
 
     msg = safe_send_message(
         chat_id,
-        f"✅ የእንግሊዝኛ ስምዎ ተዘጋጅቷል፦ **{user_data_store[chat_id]['name_en']}**\n\n"
+        f"✅ የእንግሊዝኛ ስምዎ፦ **{user_data_store[chat_id]['name_en']}**\n\n"
         "2️⃣ እባክዎ **16 አሃዝ የፋይዳ ቁጥርዎን (FAN Number)** ያስገቡ፦",
         parse_mode="Markdown"
     )
@@ -885,24 +999,19 @@ def step_fan_validation(message):
     text = message.text.strip().replace(" ", "").replace("-", "") if message.text else ""
 
     if not (text.isdigit() and len(text) == 16):
-        msg = safe_send_message(chat_id, f"❌ **ስህተት! ያስገቡት FAN ቁጥር {len(text)} አሃዝ ነው።** በትክክል 16 አሃዝ ቁጥር ብቻ ያስገቡ፦")
+        msg = safe_send_message(chat_id, f"❌ ስህተት! ያስገቡት FAN ቁጥር {len(text)} አሃዝ ነው። በትክክል 16 አሃዝ ቁጥር ብቻ ያስገቡ፦")
         if msg:
             bot.register_next_step_handler(msg, step_fan_validation)
         return
 
     if chat_id != ADMIN_CHAT_ID and is_fan_registered(text):
-        msg = safe_send_message(chat_id, "🚫 **ይህ FAN ቁጥር ቀደም ሲል ሌላ ሰው ተጠቅሞበታል!** እባክዎ የእራስዎን FAN ያስገቡ፦")
+        msg = safe_send_message(chat_id, "🚫 ይህ FAN ቁጥር ቀደም ሲል ተመዝግቧል። እባክዎ የእራስዎን FAN ያስገቡ፦")
         if msg:
             bot.register_next_step_handler(msg, step_fan_validation)
         return
 
     user_data_store[chat_id]["fan_code"] = text
-
-    prompt_dob = (
-        "3️⃣ **የትውልድ ቀንዎን በኢትዮጵያ ዘመን አቆጣጠር (E.C) ብቻ ያስገቡ፦**\n\n"
-        "💡 **ምሳሌ፦** `1994/10/29` ወይም `1990/05/12`\n"
-        "*(ሲስተሙ የፈረንጁን ቀን (G.C) በራሱ አስልቶ በካርዱ ላይ ሁለቱንም ያትማል)*"
-    )
+    prompt_dob = "3️⃣ **የትውልድ ቀንዎን በኢትዮጵያ ዘመን አቆጣጠር (E.C) ብቻ ያስገቡ፦**\n\n(ምሳሌ፡ 1994/10/29)"
     msg = safe_send_message(chat_id, prompt_dob, parse_mode="Markdown")
     if msg:
         bot.register_next_step_handler(msg, step_dob)
@@ -922,7 +1031,7 @@ def step_dob(message):
     gender_km.row("🔄 Reset / እንደገና ጀምር")
     msg = safe_send_message(
         chat_id,
-        f"✅ የትውልድ ቀን ተዘጋጅቷል፦ **{dob_ec} (E.C) | {dob_gc} (G.C)**\n\n4️⃣ **ጾታዎን ይምረጡ፦**",
+        f"✅ የትውልድ ቀን፦ **{dob_ec} (E.C) | {dob_gc} (G.C)**\n\n4️⃣ **ጾታዎን ይምረጡ፦**",
         reply_markup=gender_km,
         parse_mode="Markdown"
     )
@@ -958,7 +1067,7 @@ def step_phone(message):
         return
 
     if chat_id != ADMIN_CHAT_ID and is_phone_registered(clean_phone):
-        msg = safe_send_message(chat_id, "🚫 **ይህ ስልክ ቁጥር ቀድሞ በሌላ ካርድ ላይ ተመዝግቧል!** የእራስዎን ስልክ ያስገቡ፦")
+        msg = safe_send_message(chat_id, "🚫 ይህ ስልክ ቁጥር ቀድሞ በሌላ ካርድ ላይ ተመዝግቧል፦")
         if msg:
             bot.register_next_step_handler(msg, step_phone)
         return
@@ -966,8 +1075,12 @@ def step_phone(message):
     user_data_store[chat_id]["phone"] = clean_phone
 
     reg_km = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for r in ETHIOPIA_REGIONS.keys():
-        reg_km.add(r)
+    reg_keys = list(ETHIOPIA_REGIONS.keys())
+    for i in range(0, len(reg_keys), 2):
+        if i + 1 < len(reg_keys):
+            reg_km.row(reg_keys[i], reg_keys[i+1])
+        else:
+            reg_km.add(reg_keys[i])
     reg_km.row("🔄 Reset / እንደገና ጀምር")
 
     msg = safe_send_message(chat_id, "6️⃣ **ክልልዎን ይምረጡ (Select Region)፦**", reply_markup=reg_km, parse_mode="Markdown")
@@ -980,14 +1093,23 @@ def step_region_select(message):
         return
 
     reg_chosen = message.text.strip() if message.text else ""
-    if reg_chosen not in ETHIOPIA_REGIONS:
-        user_data_store[chat_id]["region_am"] = reg_chosen
-        user_data_store[chat_id]["region_en"] = transliterate_amharic(reg_chosen)
+    selected_reg_data = None
+    for k, v in ETHIOPIA_REGIONS.items():
+        if reg_chosen == k or reg_chosen == v["local"] or reg_chosen == v["en"]:
+            selected_reg_data = (k, v)
+            break
+
+    if not selected_reg_data:
+        user_data_store[chat_id]["region_local"] = reg_chosen
+        user_data_store[chat_id]["region_en"] = transliterate_text(reg_chosen)
+        user_data_store[chat_id]["selected_region_key"] = None
         zones_available = []
     else:
-        user_data_store[chat_id]["region_am"] = reg_chosen
-        user_data_store[chat_id]["region_en"] = ETHIOPIA_REGIONS[reg_chosen]["en"]
-        zones_available = list(ETHIOPIA_REGIONS[reg_chosen]["zones"].keys())
+        k, v = selected_reg_data
+        user_data_store[chat_id]["region_local"] = v["local"]
+        user_data_store[chat_id]["region_en"] = v["en"]
+        user_data_store[chat_id]["selected_region_key"] = k
+        zones_available = list(v["zones"].keys())
 
     zone_km = types.ReplyKeyboardMarkup(resize_keyboard=True)
     if zones_available:
@@ -1000,7 +1122,7 @@ def step_region_select(message):
 
     msg = safe_send_message(
         chat_id,
-        f"✅ ክልል፦ **{reg_chosen}** ተመርጧል!\n\n7️⃣ **ዞንዎን ይምረጡ (ወይም ይጻፉ)፦**",
+        f"✅ ክልል፦ **{user_data_store[chat_id]['region_local']} ({user_data_store[chat_id]['region_en']})** ተመርጧል!\n\n7️⃣ **ዞንዎን ይምረጡ (ወይም ይጻፉ)፦**",
         reply_markup=zone_km,
         parse_mode="Markdown"
     )
@@ -1013,13 +1135,17 @@ def step_zone_select(message):
         return
 
     zone_chosen = message.text.strip() if message.text else ""
-    user_data_store[chat_id]["zone_am"] = zone_chosen
-    user_data_store[chat_id]["zone_en"] = transliterate_amharic(zone_chosen)
+    reg_key = user_data_store[chat_id].get("selected_region_key")
 
-    reg_am = user_data_store[chat_id].get("region_am")
     woredas_available = []
-    if reg_am in ETHIOPIA_REGIONS and zone_chosen in ETHIOPIA_REGIONS[reg_am]["zones"]:
-        woredas_available = ETHIOPIA_REGIONS[reg_am]["zones"][zone_chosen]
+    if reg_key and reg_key in ETHIOPIA_REGIONS and zone_chosen in ETHIOPIA_REGIONS[reg_key]["zones"]:
+        z_info = ETHIOPIA_REGIONS[reg_key]["zones"][zone_chosen]
+        user_data_store[chat_id]["zone_local"] = zone_chosen
+        user_data_store[chat_id]["zone_en"] = z_info["en"]
+        woredas_available = z_info["woredas"]
+    else:
+        user_data_store[chat_id]["zone_local"] = zone_chosen
+        user_data_store[chat_id]["zone_en"] = transliterate_text(zone_chosen)
 
     woreda_km = types.ReplyKeyboardMarkup(resize_keyboard=True)
     if woredas_available:
@@ -1032,7 +1158,7 @@ def step_zone_select(message):
 
     msg = safe_send_message(
         chat_id,
-        f"✅ ዞን፦ **{zone_chosen}** ተመርጧል!\n\n8️⃣ **ወረዳዎን ይምረጡ (ወይም ይጻፉ)፦**",
+        f"✅ ዞን፦ **{user_data_store[chat_id]['zone_local']} ({user_data_store[chat_id]['zone_en']})** ተመርጧል!\n\n8️⃣ **ወረዳዎን ይምረጡ (ወይም ይጻፉ)፦**",
         reply_markup=woreda_km,
         parse_mode="Markdown"
     )
@@ -1045,8 +1171,8 @@ def step_woreda_select(message):
         return
 
     woreda_chosen = message.text.strip() if message.text else ""
-    user_data_store[chat_id]["woreda_am"] = woreda_chosen
-    user_data_store[chat_id]["woreda_en"] = transliterate_amharic(woreda_chosen)
+    user_data_store[chat_id]["woreda_local"] = woreda_chosen
+    user_data_store[chat_id]["woreda_en"] = transliterate_text(woreda_chosen)
 
     msg = safe_send_message(
         chat_id,
@@ -1059,7 +1185,7 @@ def step_woreda_select(message):
         bot.register_next_step_handler(msg, step_photo)
 
 # -------------------------------------------------------------------------
-# 13. Photo Processing & High-Speed PDF Delivery
+# 14. እጅግ ፈጣን ፒዲኤፍ ማመንጫ እና መላኪያ (Ultra-Fast PDF Generator)
 # -------------------------------------------------------------------------
 def step_photo(message):
     chat_id = message.chat.id
@@ -1074,13 +1200,10 @@ def step_photo(message):
 
     status_msg = safe_send_message(chat_id, "⚡ ካርዱ በቅጽበት እየተዘጋጀ ነው...")
 
+    # ፎቶውን በቀጥታ በMemory (RAM) ውስጥ ብቻ በማስቀመጥ ፋይል መጻፍ/ማንበብን ማስቀረት
     file_info = bot.get_file(message.photo[-1].file_id)
-    downloaded = bot.download_file(file_info.file_path)
-
-    os.makedirs("temp_photos", exist_ok=True)
-    temp_photo = os.path.join("temp_photos", f"photo_{chat_id}.jpg")
-    with open(temp_photo, 'wb') as f:
-        f.write(downloaded)
+    photo_bytes = bot.download_file(file_info.file_path)
+    photo_reader = ImageReader(BytesIO(photo_bytes))
 
     u = user_data_store.get(chat_id, {})
     theme = COLOR_THEMES.get(u.get("theme", "PDF 1"), COLOR_THEMES["PDF 1"])
@@ -1097,61 +1220,75 @@ def step_photo(message):
         "expiry_gc": "2034/May/01",
         "fan_code": u.get("fan_code", ""),
         "phone": u.get("phone", ""),
-        "region_am": u.get("region_am", ""),
+        "region_local": u.get("region_local", ""),
         "region_en": u.get("region_en", ""),
-        "zone_am": u.get("zone_am", ""),
+        "zone_local": u.get("zone_local", ""),
         "zone_en": u.get("zone_en", ""),
-        "woreda_am": u.get("woreda_am", ""),
+        "woreda_local": u.get("woreda_local", ""),
         "woreda_en": u.get("woreda_en", ""),
         "fin": fin_number,
         "sn": str(int(time.time()))[-7:]
     }
 
-    save_card_record(
-        chat_id=chat_id,
-        name_am=card_data["name_am"],
-        name_en=card_data["name_en"],
-        fan=card_data["fan_code"],
-        phone=card_data["phone"],
-        fin=fin_number,
-        theme=u.get("theme", "PDF 1")
-    )
-    deduct_for_card(chat_id)
-
+    # ፒዲኤፍ ማመንጨት (1-2 ሰከንድ ብቻ)
     pdf_buffer = BytesIO()
     c = canvas.Canvas(pdf_buffer, pagesize=(CARD_W, CARD_H))
-    draw_card_front(c, card_data, temp_photo, theme)
+    draw_card_front(c, card_data, photo_reader, theme)
     c.showPage()
-    draw_card_back(c, card_data, temp_photo, theme)
+    draw_card_back(c, card_data, photo_bytes, theme)
     c.showPage()
     c.save()
     pdf_buffer.seek(0)
 
     filename = f"Fayda_Card_{card_data['name_en'].replace(' ', '_')}.pdf"
     
-    for attempt in range(3):
-        try:
-            bot.send_document(
-                chat_id,
-                (filename, pdf_buffer.getvalue()),
-                caption=(
-                    f"🎉 **እንኳን ደስ አለዎት! ካርድዎ ተዘጋጅቷል።**\n\n"
-                    f"👤 **ስም**: {card_data['name_am']} ({card_data['name_en']})\n"
-                    f"🆔 **FAN**: `{card_data['fan_code']}`\n"
-                    f"📅 **የትውልድ ቀን**: `{card_data['dob_ec']} (E.C) | {card_data['dob_gc']} (G.C)`\n"
-                    f"📍 **አድራሻ**: {card_data['region_am']} | {card_data['zone_am']} | {card_data['woreda_am']}\n"
-                    f"🔑 **FIN**: `{fin_number}`\n"
-                    f"🎨 **ቴምፕሌት**: {u.get('theme', 'PDF 1')}"
-                ),
-                reply_markup=get_main_keyboard(),
-                parse_mode="Markdown"
-            )
-            break
-        except Exception:
-            time.sleep(2)
+    # ፒዲኤፉን በቀጥታ ለተጠቃሚው መላክ
+    try:
+        bot.send_document(
+            chat_id,
+            (filename, pdf_buffer.getvalue()),
+            caption=(
+                f"🎉 **ካርድዎ ተዘጋጅቷል!**\n\n"
+                f"👤 **ስም**: {card_data['name_am']} ({card_data['name_en']})\n"
+                f"🆔 **FAN**: `{card_data['fan_code']}`\n"
+                f"📅 **የትውልድ ቀን**: `{card_data['dob_ec']} (E.C) | {card_data['dob_gc']} (G.C)`\n"
+                f"📍 **አድራሻ**: {card_data['region_local']} | {card_data['zone_local']}\n"
+                f"🔑 **FIN**: `{fin_number}`\n"
+                f"🎨 **ቴምፕሌት**: {u.get('theme', 'PDF 1')}"
+            ),
+            reply_markup=get_main_keyboard(),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Send document error: {e}")
 
-    if os.path.exists(temp_photo):
-        os.remove(temp_photo)
+    # ዳታቤዝ እና የአድሚን ማሳወቂያን ከበስተጀርባ (Background) ማካሄድ ካርዱ እንዳይዘገይ
+    def _background_save_and_notify():
+        try:
+            save_card_record(
+                chat_id=chat_id,
+                name_am=card_data["name_am"],
+                name_en=card_data["name_en"],
+                fan=card_data["fan_code"],
+                phone=card_data["phone"],
+                fin=fin_number,
+                theme=u.get("theme", "PDF 1")
+            )
+            deduct_for_card(chat_id)
+            notify_admin(
+                f"🪪 **አዲስ ካርድ ወጥቷል!**\n\n"
+                f"👤 ስም: {card_data['name_am']} ({card_data['name_en']})\n"
+                f"🆔 FAN: `{card_data['fan_code']}`\n"
+                f"📞 ስልክ: `{card_data['phone']}`\n"
+                f"📍 አድራሻ: {card_data['region_en']}, {card_data['zone_en']}\n"
+                f"🎨 ቴምፕሌት: {u.get('theme', 'PDF 1')}\n"
+                f"🆔 Chat ID: `{chat_id}`"
+            )
+        except Exception:
+            pass
+
+    threading.Thread(target=_background_save_and_notify, daemon=True).start()
+
     if status_msg:
         try:
             bot.delete_message(chat_id, status_msg.message_id)
@@ -1159,7 +1296,7 @@ def step_photo(message):
             pass
 
 # -------------------------------------------------------------------------
-# 14. FAN/FIN Recovery
+# 15. FAN/FIN መፈለጊያ
 # -------------------------------------------------------------------------
 def step_search_record(message):
     chat_id = message.chat.id
@@ -1173,7 +1310,7 @@ def step_search_record(message):
         name_am, name_en, fan, phone, fin = record
         safe_send_message(
             chat_id,
-            f"✅ **በዳታቤዝ የተገኘ የእርስዎ መረጃ፦**\n\n"
+            f"✅ **የተገኘ መረጃ፦**\n\n"
             f"👤 **ስም**: {name_am} / {name_en}\n"
             f"📞 **ስልክ**: `{phone}`\n"
             f"🆔 **FAN ቁጥር**: `{fan}`\n"
@@ -1182,15 +1319,10 @@ def step_search_record(message):
             parse_mode="Markdown"
         )
     else:
-        safe_send_message(
-            chat_id,
-            f"❌ **በ `{query_text}` የተመዘገበ መረጃ አልተገኘም!**",
-            reply_markup=get_main_keyboard(),
-            parse_mode="Markdown"
-        )
+        safe_send_message(chat_id, f"❌ በ `{query_text}` የተመዘገበ መረጃ አልተገኘም!", reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
 # -------------------------------------------------------------------------
-# 15. Universal Button Router
+# 16. Universal Button Router
 # -------------------------------------------------------------------------
 def check_and_route_button(message):
     if not message.text:
@@ -1223,27 +1355,20 @@ def check_and_route_button(message):
         return True
     return False
 
-# -------------------------------------------------------------------------
-# 16. Catch-All Message Handler
-# -------------------------------------------------------------------------
 @bot.message_handler(func=lambda m: True, content_types=['text'])
 def catch_all_messages(message):
     if check_and_route_button(message):
         return
-    safe_send_message(
-        message.chat.id, 
-        "እባክዎ ከታች ካሉት አዝራሮች አንዱን ይምረጡ፦", 
-        reply_markup=get_main_keyboard()
-    )
+    safe_send_message(message.chat.id, "እባክዎ ከታች ካሉት አዝራሮች አንዱን ይምረጡ፦", reply_markup=get_main_keyboard())
 
 # -------------------------------------------------------------------------
-# 17. Dummy Port Server (For Render Web Service)
+# 17. Dummy Port Server (ለ Render)
 # -------------------------------------------------------------------------
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Dires Fayda Bot is Live and Healthy 24/7!")
+        self.wfile.write(b"Dires Fayda Bot is Live and Ultra Fast!")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
@@ -1251,21 +1376,19 @@ def run_dummy_server():
     server.serve_forever()
 
 # -------------------------------------------------------------------------
-# 18. Main Polling Loop
+# 18. Polling Loop
 # -------------------------------------------------------------------------
 def main():
-    print("🧹 Clearing stale updates and webhooks...")
     try:
         bot.remove_webhook()
     except Exception:
         pass
-    print("🚀 Dires Hub Bot (High-Speed & Non-Freezing Engine) is running...")
+    print("🚀 Dires Hub Bot (Ultra Fast PDF Engine) is running...")
     
     while True:
         try:
             bot.polling(none_stop=True, timeout=25, long_polling_timeout=25)
-        except Exception as e:
-            print(f"Polling reconnect: {e}")
+        except Exception:
             time.sleep(2)
 
 if __name__ == "__main__":
