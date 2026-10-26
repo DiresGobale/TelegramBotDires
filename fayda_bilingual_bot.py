@@ -28,11 +28,25 @@ from reportlab.pdfbase.ttfonts import TTFont
 # -------------------------------------------------------------------------
 # 1. API Configuration & Admin Settings
 # -------------------------------------------------------------------------
+def load_env():
+    if os.path.exists(".env"):
+        try:
+            with open(".env", "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        os.environ.setdefault(k.strip().strip('"\''), v.strip().strip('"\''))
+        except Exception:
+            pass
+
+load_env()
+
 apihelper.CONNECT_TIMEOUT = 90
 apihelper.READ_TIMEOUT = 90
 apihelper.RETRY_ON_ERROR = True
 
-TELEGRAM_BOT_TOKEN = "8732862832:AAHw0yxGvSsRJCk6HiR0b_uJ0gU2ee7hF0U"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8732862832:AAFmCLSlMxnJOWj3uoayEO6DSC3IqlhSNq4")
 ADMIN_CHAT_ID = 6192192453
 ADMIN_CHAT_IDS = {6192192453, 8732862832}
 
@@ -1729,9 +1743,12 @@ def run_dummy_server():
 # -------------------------------------------------------------------------
 def main():
     try:
-        bot.remove_webhook()
+        bot.delete_webhook(drop_pending_updates=True)
     except Exception:
-        pass
+        try:
+            bot.remove_webhook()
+        except Exception:
+            pass
     print("🚀 Dires Hub Bot (Vibrant Mint-Green & Yellow Dual-Tone Engine) is running...")
     
     while True:
